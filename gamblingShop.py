@@ -1,7 +1,6 @@
 # Imports:
 import random, time, os
 import corridors as C
-import main as M
 
 def Shop():
     print("You have entered the gambling shop!") # Need to add shop code here
@@ -22,6 +21,7 @@ def Shop():
                 print(f"You got {creditsGained} credits")
                 with open(os.path.join(os.path.dirname(__file__), "global.txt"), "r") as f:
                     username = f.read()
+                import main as M
                 M.updateCredits(username, creditsGained)
                 exit()
         elif int(options) == 2:
