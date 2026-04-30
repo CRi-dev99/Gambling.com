@@ -1,5 +1,5 @@
 # Imports:
-import os, random, time 
+import os, random, time, subprocess
 import gamblingShop as GShop
 
 # Symbols used in the slot machine:
@@ -22,30 +22,32 @@ def slotMachine(credits):
     |💸 |🍊 |🍑 |
     |___|___|___|
 ''')
-    amount = int(input("Enter amount of credits to be used: "))
-
-    if amount > credits:
-        os.system('cls')
-        print("You do not have enough credits")
-        print(f"Credits: {credits}")
-        print("However, you can buy more credits!")
-        gamblingShop = input(f"Enter the shop for {random.choice(catchphrase)} (y/n): ").lower()
-        if gamblingShop == "y":
-            GShop.Shop() # Runs the 'Shop()' function from gamblingShop.py
-        elif gamblingShop == "n":
-            print("How could you miss out on this one-in-a-lifetime chance!")
-            print("Don't worry, you can also win more credits by playing the slot machine")
-            exit() # Maybe set something to go back into the slot machine
+    while True:
+        print('''Press:
+    S to spin the slot machine,
+    G to go to the shop or
+    Q to quit''')
+        options = input(">>> ").lower()
+        if options == "s":
+            pass
+        elif options == "g":
+            subprocess.run('cls', shell=True)
+            result = GShop.Shop() # Runs the 'Shop()' function from gamblingShop.py
+            if result:
+                time.sleep(2)
+                continue
+        elif options == "q":
+            print("Goodbye!")
+            break
         else:
             print("Sorry, I didn't get that")
-            exit() # Set a loop here, maybe
+            options = input(">>> ").lower()
 
-    for i in range (amount):
         credits -= 1
         # Slot machine runs here
-        os.system('cls')
+        subprocess.run('cls', shell=True)
         for p in range(7): # Number of spins till it lands on a final result
-            os.system('cls')
+            subprocess.run('cls', shell=True)
             reel1 = random.choice(symbols)
             reel2 = random.choice(symbols)
             reel3 = random.choice(symbols)

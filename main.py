@@ -1,4 +1,4 @@
-import os, time, random
+import os, time, random, subprocess
 import anotherSlotMachine as SMachine
 import gamblingShop as GShop
 
@@ -61,9 +61,9 @@ def login():
         print(f"Username {username} not associated with a valid account")
         registerQuestion = input("Would you like to create an account? (y/n): ").lower()
         if registerQuestion == "y":
-            os.system('cls')
+            subprocess.run('cls', shell=True)
             register()
-            os.system('cls')
+            subprocess.run('cls', shell=True)
             login()
 
         else:
@@ -97,9 +97,11 @@ def login():
         with open(os.path.join(os.path.dirname(__file__), "global.txt"), "w") as f:
             f.write(usernameLogin)
         # This is where a successful login would lead to the next part of the program
-        keepPlaying = True
+        newCredits = SMachine.slotMachine(loginCredits)
+        updateCredits(usernameLogin, newCredits)
+        '''keepPlaying = True
         while keepPlaying:
-            os.system('cls')
+            subprocess.run('cls', shell=True)
             newCredits = SMachine.slotMachine(loginCredits)
             updateCredits(usernameLogin, newCredits)
             if DEBUG:
@@ -113,8 +115,9 @@ def login():
                 keepPlaying = False
                 print("Thanks for playing at Gambling.com!")
                 time.sleep(2)
-                os.system('cls')
-                updateCredits(usernameLogin, newCredits)
+                subprocess.run('cls', shell=True)
+                updateCredits(usernameLogin, newCredits)'''
+        
             # Make a credits update function here to update the credits in the userData.txt file
 
     else:
@@ -140,21 +143,21 @@ def updateCredits(username, newCredits):
     with open("UserData.txt", "w") as f:
         f.write(updatedAllUserData)
 
-os.system('cls')
+subprocess.run('cls', shell=True)
 print('''
     -Gambling.com-
 ''')
 print("Welcome loyal gambler.")
-account = input("Do you have an account? (y/n): ").lower()
+account = input("Do you have an account? (y/n): ").lower().strip()
 if account == "y":
-    os.system('cls')
+    subprocess.run('cls', shell=True)
     login()
 elif account == "n":
     registerQuestion = input("Would you like to create an account? (y/n): ").lower()
     if registerQuestion == "y":
-        os.system('cls')
+        subprocess.run('cls', shell=True)
         register()
-        os.system('cls')
+        subprocess.run('cls', shell=True)
         print("Account created successfully! Please log in now to verify your details.")
         login()
     else:
