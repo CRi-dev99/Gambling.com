@@ -18,6 +18,8 @@ test("database schema blocks direct client credit writes", async () => {
 
   assert.equal(/create\s+policy\s+"profiles_update_own"/i.test(schema), false);
   assert.equal(/create\s+policy\s+"history_insert_own"/i.test(schema), false);
+  assert.equal(schema.includes("grant select on public.profiles to authenticated"), true);
+  assert.equal(schema.includes("grant select on public.game_history to authenticated"), true);
   assert.equal(schema.includes("revoke insert, update, delete on public.profiles from anon, authenticated"), true);
   assert.equal(schema.includes("revoke insert, update, delete on public.game_history from anon, authenticated"), true);
   assert.equal(schema.includes("revoke all on public.game_sessions from anon, authenticated"), true);

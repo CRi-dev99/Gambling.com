@@ -77,6 +77,10 @@ on public.game_history for select
 to authenticated
 using ((select auth.uid()) = profile_id);
 
+grant usage on schema public to authenticated;
+grant select on public.profiles to authenticated;
+grant select on public.game_history to authenticated;
+
 revoke insert, update, delete on public.profiles from anon, authenticated;
 revoke insert, update, delete on public.game_history from anon, authenticated;
 revoke all on public.game_sessions from anon, authenticated;

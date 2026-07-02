@@ -14,45 +14,105 @@ const games = [
     id: "blackjack",
     title: "Blackjack",
     type: "Table game",
-    icon: "21",
+    icon: "blackjack",
     description: "Beat the dealer without busting. Blackjack pays 3:2."
   },
   {
     id: "poker",
     title: "Five-card Poker",
     type: "Card game",
-    icon: "P",
+    icon: "poker",
     description: "Hold, draw, and chase a strong five-card hand."
   },
   {
     id: "solitaire",
     title: "Solitaire",
     type: "Card puzzle",
-    icon: "S",
+    icon: "solitaire",
     description: "Clear Klondike foundations for a fixed credit prize."
   },
   {
     id: "slots",
     title: "Slots",
     type: "Machine",
-    icon: "$",
+    icon: "slots",
     description: "Spin three weighted reels and chase premium symbols."
   },
   {
     id: "corridor",
     title: "Corridor",
     type: "Minigame",
-    icon: "C",
+    icon: "corridor",
     description: "Pick doors, bank bonuses, or risk the next room."
   },
   {
     id: "dice",
     title: "Dice Duel",
     type: "Minigame",
-    icon: "D",
+    icon: "dice",
     description: "Call high, low, or doubles against the house dice."
   }
 ];
+
+function iconSvg(name) {
+  const icons = {
+    dashboard: `
+      <svg class="icon-svg" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+        <rect x="4" y="4" width="6" height="6" rx="1.5"></rect>
+        <rect x="14" y="4" width="6" height="6" rx="1.5"></rect>
+        <rect x="4" y="14" width="6" height="6" rx="1.5"></rect>
+        <rect x="14" y="14" width="6" height="6" rx="1.5"></rect>
+      </svg>
+    `,
+    blackjack: `
+      <svg class="icon-svg" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+        <rect x="5" y="4" width="10" height="15" rx="2" transform="rotate(-7 10 11.5)"></rect>
+        <rect x="9" y="5" width="10" height="15" rx="2" transform="rotate(7 14 12.5)"></rect>
+        <path d="M9 9h4M9 13h6M9 17h5"></path>
+      </svg>
+    `,
+    poker: `
+      <svg class="icon-svg" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+        <rect x="4" y="7" width="8" height="13" rx="2" transform="rotate(-12 8 13.5)"></rect>
+        <rect x="8" y="5" width="8" height="15" rx="2"></rect>
+        <rect x="12" y="7" width="8" height="13" rx="2" transform="rotate(12 16 13.5)"></rect>
+      </svg>
+    `,
+    solitaire: `
+      <svg class="icon-svg" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+        <rect x="7" y="5" width="10" height="14" rx="2"></rect>
+        <path d="M10 11l2-3 2 3"></path>
+        <path d="M9 15h6"></path>
+      </svg>
+    `,
+    slots: `
+      <svg class="icon-svg" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+        <rect x="4" y="6" width="14" height="12" rx="2"></rect>
+        <path d="M18 10h2M20 10v5"></path>
+        <path d="M8 9v6M12 9v6M16 9v6"></path>
+      </svg>
+    `,
+    corridor: `
+      <svg class="icon-svg" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+        <path d="M7 20V5.8c0-.9.6-1.7 1.5-1.9L17 2v20l-8.5-1.9A1.9 1.9 0 0 1 7 18.2Z"></path>
+        <path d="M17 5h2v14h-2"></path>
+        <path d="M13.5 12h.1"></path>
+      </svg>
+    `,
+    dice: `
+      <svg class="icon-svg" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+        <rect x="5" y="5" width="14" height="14" rx="3"></rect>
+        <circle cx="9" cy="9" r="1"></circle>
+        <circle cx="15" cy="9" r="1"></circle>
+        <circle cx="12" cy="12" r="1"></circle>
+        <circle cx="9" cy="15" r="1"></circle>
+        <circle cx="15" cy="15" r="1"></circle>
+      </svg>
+    `
+  };
+
+  return icons[name] || icons.dashboard;
+}
 
 const betMemory = new Map(games.map((game) => [game.id, 10]));
 
@@ -216,11 +276,16 @@ async function handleSignOut() {
 }
 
 function renderNav() {
-  elements.gameNav.innerHTML = games
+  elements.gameNav.innerHTML = `
+    <button class="nav-button" type="button" data-dashboard="true">
+      <span class="nav-icon">${iconSvg("dashboard")}</span>
+      <span>Dashboard</span>
+    </button>
+  ` + games
     .map(
       (game) => `
         <button class="nav-button" type="button" data-game="${game.id}">
-          <span class="nav-icon">${escapeHtml(game.icon)}</span>
+          <span class="nav-icon">${iconSvg(game.icon)}</span>
           <span>${escapeHtml(game.title)}</span>
         </button>
       `
@@ -230,6 +295,7 @@ function renderNav() {
   elements.gameNav.querySelectorAll("[data-game]").forEach((button) => {
     button.addEventListener("click", () => openGame(button.dataset.game));
   });
+  elements.gameNav.querySelector("[data-dashboard]").addEventListener("click", showDashboard);
 }
 
 function renderDashboard() {
@@ -238,7 +304,7 @@ function renderDashboard() {
       (game) => `
         <article class="game-card">
           <div>
-            <div class="game-card-icon">${escapeHtml(game.icon)}</div>
+            <div class="game-card-icon">${iconSvg(game.icon)}</div>
             <p class="eyebrow">${escapeHtml(game.type)}</p>
             <h3>${escapeHtml(game.title)}</h3>
             <p>${escapeHtml(game.description)}</p>
@@ -260,7 +326,7 @@ function showDashboard() {
   elements.dashboardView.classList.remove("is-hidden");
   elements.gameView.classList.add("is-hidden");
   elements.gameRoot.innerHTML = "";
-  markActiveNav(null);
+  markActiveNav("dashboard");
 }
 
 async function openGame(gameId) {
@@ -287,6 +353,9 @@ async function openGame(gameId) {
 }
 
 function markActiveNav(gameId) {
+  elements.gameNav.querySelectorAll("[data-dashboard]").forEach((button) => {
+    button.classList.toggle("is-active", gameId === "dashboard");
+  });
   elements.gameNav.querySelectorAll("[data-game]").forEach((button) => {
     button.classList.toggle("is-active", button.dataset.game === gameId);
   });
