@@ -99,7 +99,7 @@ async function init() {
 
   unsubscribeAuth = onAuthChange(async (session) => {
     if (session?.user) {
-      await loadProfile(session.user);
+      window.setTimeout(() => loadProfile(session.user), 0);
     } else {
       showAuth();
     }
