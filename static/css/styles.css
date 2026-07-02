@@ -133,6 +133,10 @@ h3 {
   color: var(--cream);
 }
 
+.form-message:empty {
+  display: none;
+}
+
 .segmented {
   display: grid;
   grid-template-columns: 1fr 1fr;

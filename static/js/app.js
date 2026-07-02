@@ -86,6 +86,7 @@ let authMode = "signin";
 let profile = null;
 let currentGame = null;
 let unsubscribeAuth = () => {};
+let loadingProfileForUserId = null;
 
 init();
 
@@ -153,11 +154,20 @@ async function handleAuthSubmit(event) {
     if (authMode === "signup") {
       const username = elements.usernameInput.value.trim() || email.split("@")[0];
       const data = await signUp(email, password, username);
-      if (!data.session) {
+      if (data.session?.user) {
+        showAuthMessage("Loading account...");
+        await loadProfile(data.session.user);
+      } else {
         showAuthMessage("Account created. Check your email if confirmation is enabled.");
       }
     } else {
-      await signIn(email, password);
+      const data = await signIn(email, password);
+      if (data.session?.user) {
+        showAuthMessage("Loading account...");
+        await loadProfile(data.session.user);
+      } else {
+        showAuthMessage("Signed in. Loading account...");
+      }
     }
   } catch (error) {
     showAuthMessage(error.message, true);
@@ -167,12 +177,18 @@ async function handleAuthSubmit(event) {
 }
 
 async function loadProfile(user) {
+  if (loadingProfileForUserId === user.id) return;
+  loadingProfileForUserId = user.id;
+
   try {
+    showAuthMessage("Loading account...");
     profile = await ensureProfile(user);
     enterApp();
   } catch (error) {
     showAuthMessage(error.message, true);
     showAuth();
+  } finally {
+    loadingProfileForUserId = null;
   }
 }
 
