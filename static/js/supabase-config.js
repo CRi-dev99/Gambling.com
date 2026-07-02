@@ -1,5 +1,5 @@
 window.GAMBLING_SUPABASE = {
-  url: "https://YOUR_PROJECT_ID.supabase.co",
-  anonKey: "YOUR_SUPABASE_ANON_KEY",
+  url: "https://fowyxzbsvpxhjpdfoluk.supabase.co/",
+  anonKey: "sb_publishable_XP5fuGoUQytngV0g-WzBJw_qGmuml7x",
   startingCredits: 1000
 };
