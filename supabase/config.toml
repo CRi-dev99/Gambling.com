@@ -1,0 +1,2 @@
+[functions.play-game]
+verify_jwt = true

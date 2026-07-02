@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://cdn.jsdelivr.net; style-src 'self'; connect-src 'self' https://*.supabase.co wss://*.supabase.co; img-src 'self' data:; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'">
+    <title>Gambling.com Casino</title>
+    <link rel="stylesheet" href="static/css/styles.css">
+    <script src="static/js/supabase-config.js"></script>
+    <script
+      src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.110.0/dist/umd/supabase.min.js"
+      integrity="sha384-DjOvX/sJLsmbMrw4wTvf6l3kiGBjdxyOO6X2MTFwOOXGkjN/mE08BoDzrpaaIjil"
+      crossorigin="anonymous"></script>
+    <script type="module" src="static/js/app.js"></script>
+  </head>
+  <body>
+    <div id="authScreen" class="auth-screen">
+      <section class="auth-panel" aria-labelledby="authTitle">
+        <div class="brand-lockup">
+          <span class="brand-mark" aria-hidden="true">G</span>
+          <div>
+            <p class="eyebrow">Fictional credits casino</p>
+            <h1 id="authTitle">Gambling.com</h1>
+          </div>
+        </div>
+
+        <div id="setupWarning" class="notice is-hidden">
+          Supabase is not configured yet. Add your project URL and anon key in
+          <code>static/js/supabase-config.js</code>.
+        </div>
+
+        <div class="segmented" role="tablist" aria-label="Account mode">
+          <button id="showSignIn" class="segment is-active" type="button">Sign in</button>
+          <button id="showSignUp" class="segment" type="button">Create account</button>
+        </div>
+
+        <form id="authForm" class="auth-form">
+          <label id="usernameField" class="field is-hidden">
+            <span>Username</span>
+            <input id="usernameInput" autocomplete="nickname" maxlength="24" placeholder="Casino name">
+          </label>
+          <label class="field">
+            <span>Email</span>
+            <input id="emailInput" type="email" autocomplete="email" required placeholder="you@example.com">
+          </label>
+          <label class="field">
+            <span>Password</span>
+            <input id="passwordInput" type="password" autocomplete="current-password" required minlength="6" placeholder="6+ characters">
+          </label>
+          <button id="authSubmit" class="primary-action" type="submit">Sign in</button>
+          <p id="authMessage" class="form-message" role="status"></p>
+        </form>
+      </section>
+    </div>
+
+    <div id="appShell" class="app-shell is-hidden">
+      <aside class="sidebar">
+        <div class="brand-lockup compact">
+          <span class="brand-mark" aria-hidden="true">G</span>
+          <div>
+            <p class="eyebrow">Casino floor</p>
+            <strong>Gambling.com</strong>
+          </div>
+        </div>
+        <nav id="gameNav" class="game-nav" aria-label="Games"></nav>
+        <button id="signOutButton" class="ghost-action sign-out" type="button">Sign out</button>
+      </aside>
+
+      <main class="main-panel">
+        <header class="topbar">
+          <div>
+            <p class="eyebrow" id="sessionLabel">Signed in</p>
+            <h2 id="viewTitle">Casino Dashboard</h2>
+          </div>
+          <div class="wallet" aria-live="polite">
+            <span>Credits</span>
+            <strong id="creditBalance">0</strong>
+          </div>
+        </header>
+
+        <section id="dashboardView" class="dashboard-grid"></section>
+
+        <section id="gameView" class="game-view is-hidden">
+          <div class="game-toolbar">
+            <button id="backButton" class="icon-action" type="button" aria-label="Back to dashboard">&larr;</button>
+            <div>
+              <p class="eyebrow" id="gameTypeLabel">Game</p>
+              <h3 id="gameTitle">Game</h3>
+            </div>
+          </div>
+          <div id="gameRoot" class="game-root"></div>
+        </section>
+      </main>
+    </div>
+  </body>
+</html>
