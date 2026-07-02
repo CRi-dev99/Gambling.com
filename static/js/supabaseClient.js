@@ -111,9 +111,22 @@ async function invokeGameServer(payload) {
   const { data, error } = await supabase.functions.invoke("play-game", {
     body: payload
   });
-  if (error) throw error;
+  if (error) throw new Error(await functionErrorMessage(error));
   if (data?.error) throw new Error(data.error);
   return data;
+}
+
+async function functionErrorMessage(error) {
+  const fallback = error?.message || "Edge Function request failed.";
+  const response = error?.context;
+  if (!response || typeof response.clone !== "function") return fallback;
+
+  try {
+    const body = await response.clone().json();
+    return body?.error || body?.message || fallback;
+  } catch {
+    return fallback;
+  }
 }
 
 function normalizeProfile(rawProfile) {

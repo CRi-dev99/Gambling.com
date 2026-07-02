@@ -434,10 +434,10 @@ begin
 end;
 $$;
 
-revoke execute on function public.ensure_profile(uuid, text) from anon, authenticated;
-revoke execute on function public.create_game_session(uuid, text, jsonb, text, numeric, numeric, text, text) from anon, authenticated;
-revoke execute on function public.apply_game_step(uuid, uuid, integer, text, jsonb, text, numeric, numeric, text, text) from anon, authenticated;
-revoke execute on function public.apply_multiplayer_credit_entries(uuid, text, jsonb) from anon, authenticated;
+revoke execute on function public.ensure_profile(uuid, text) from public, anon, authenticated;
+revoke execute on function public.create_game_session(uuid, text, jsonb, text, numeric, numeric, text, text) from public, anon, authenticated;
+revoke execute on function public.apply_game_step(uuid, uuid, integer, text, jsonb, text, numeric, numeric, text, text) from public, anon, authenticated;
+revoke execute on function public.apply_multiplayer_credit_entries(uuid, text, jsonb) from public, anon, authenticated;
 
 grant execute on function public.ensure_profile(uuid, text) to service_role;
 grant execute on function public.create_game_session(uuid, text, jsonb, text, numeric, numeric, text, text) to service_role;
