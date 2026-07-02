@@ -33,7 +33,44 @@ create table if not exists public.game_sessions (
   updated_at timestamptz not null default now()
 );
 
+create table if not exists public.multiplayer_tables (
+  id uuid primary key default gen_random_uuid(),
+  game_id text not null check (game_id in ('blackjack', 'poker', 'dice')),
+  host_profile_id uuid not null references public.profiles(id) on delete cascade,
+  stake numeric(12,2) not null check (stake > 0 and stake <= 10000),
+  max_players integer not null default 6 check (max_players between 2 and 6),
+  status text not null default 'waiting' check (status in ('waiting', 'active', 'complete', 'cancelled')),
+  visibility text not null default 'public' check (visibility in ('public', 'private')),
+  invite_code text not null unique,
+  turn_profile_id uuid references public.profiles(id) on delete set null,
+  turn_deadline_at timestamptz,
+  public_state jsonb not null default '{}'::jsonb,
+  version integer not null default 1,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create table if not exists public.multiplayer_table_seats (
+  table_id uuid not null references public.multiplayer_tables(id) on delete cascade,
+  profile_id uuid not null references public.profiles(id) on delete cascade,
+  seat_index integer not null check (seat_index between 0 and 5),
+  username text not null default 'Player',
+  status text not null default 'seated' check (status in ('seated', 'ready', 'active', 'settled', 'left', 'abandoned')),
+  settled_delta numeric(12,2) not null default 0,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  primary key (table_id, profile_id),
+  unique (table_id, seat_index)
+);
+
+create table if not exists public.multiplayer_table_state (
+  table_id uuid primary key references public.multiplayer_tables(id) on delete cascade,
+  state jsonb not null default '{}'::jsonb,
+  updated_at timestamptz not null default now()
+);
+
 alter table public.game_history add column if not exists session_id uuid;
+alter table public.game_history add column if not exists multiplayer_table_id uuid;
 alter table public.game_history add column if not exists balance_after numeric(12,2) not null default 0;
 alter table public.game_history add column if not exists action text not null default 'system';
 alter table public.profiles alter column credits type numeric(12,2) using credits::numeric(12,2);
@@ -56,9 +93,28 @@ begin
 end;
 $$;
 
+do $$
+begin
+  if not exists (
+    select 1
+    from information_schema.table_constraints
+    where constraint_schema = 'public'
+      and table_name = 'game_history'
+      and constraint_name = 'game_history_multiplayer_table_id_fkey'
+  ) then
+    alter table public.game_history
+    add constraint game_history_multiplayer_table_id_fkey
+    foreign key (multiplayer_table_id) references public.multiplayer_tables(id) on delete set null;
+  end if;
+end;
+$$;
+
 alter table public.profiles enable row level security;
 alter table public.game_history enable row level security;
 alter table public.game_sessions enable row level security;
+alter table public.multiplayer_tables enable row level security;
+alter table public.multiplayer_table_seats enable row level security;
+alter table public.multiplayer_table_state enable row level security;
 
 drop policy if exists "profiles_select_own" on public.profiles;
 drop policy if exists "profiles_insert_own" on public.profiles;
@@ -66,6 +122,38 @@ drop policy if exists "profiles_update_own" on public.profiles;
 drop policy if exists "history_select_own" on public.game_history;
 drop policy if exists "history_insert_own" on public.game_history;
 drop policy if exists "sessions_select_own" on public.game_sessions;
+drop policy if exists "multiplayer_tables_select_lobby_or_seated" on public.multiplayer_tables;
+drop policy if exists "multiplayer_seats_select_lobby_or_seated" on public.multiplayer_table_seats;
+drop policy if exists "multiplayer_state_select_never" on public.multiplayer_table_state;
+
+create or replace function public.is_multiplayer_table_member(p_table_id uuid)
+returns boolean
+language sql
+security definer
+set search_path = public
+as $$
+  select exists (
+    select 1
+    from public.multiplayer_table_seats seats
+    where seats.table_id = p_table_id
+      and seats.profile_id = (select auth.uid())
+      and seats.status in ('seated', 'ready', 'active', 'settled')
+  );
+$$;
+
+create or replace function public.is_multiplayer_table_public(p_table_id uuid)
+returns boolean
+language sql
+security definer
+set search_path = public
+as $$
+  select exists (
+    select 1
+    from public.multiplayer_tables tables
+    where tables.id = p_table_id
+      and tables.visibility = 'public'
+  );
+$$;
 
 create policy "profiles_select_own"
 on public.profiles for select
@@ -77,13 +165,58 @@ on public.game_history for select
 to authenticated
 using ((select auth.uid()) = profile_id);
 
+create policy "multiplayer_tables_select_lobby_or_seated"
+on public.multiplayer_tables for select
+to authenticated
+using (
+  visibility = 'public'
+  or public.is_multiplayer_table_member(id)
+);
+
+create policy "multiplayer_seats_select_lobby_or_seated"
+on public.multiplayer_table_seats for select
+to authenticated
+using (
+  public.is_multiplayer_table_public(table_id)
+  or public.is_multiplayer_table_member(table_id)
+);
+
 grant usage on schema public to authenticated;
 grant select on public.profiles to authenticated;
 grant select on public.game_history to authenticated;
+grant select on public.multiplayer_tables to authenticated;
+grant select on public.multiplayer_table_seats to authenticated;
 
 revoke insert, update, delete on public.profiles from anon, authenticated;
 revoke insert, update, delete on public.game_history from anon, authenticated;
 revoke all on public.game_sessions from anon, authenticated;
+revoke insert, update, delete on public.multiplayer_tables from anon, authenticated;
+revoke insert, update, delete on public.multiplayer_table_seats from anon, authenticated;
+revoke all on public.multiplayer_table_state from anon, authenticated;
+
+do $$
+begin
+  if exists (select 1 from pg_publication where pubname = 'supabase_realtime') then
+    if not exists (
+      select 1 from pg_publication_tables
+      where pubname = 'supabase_realtime'
+        and schemaname = 'public'
+        and tablename = 'multiplayer_tables'
+    ) then
+      alter publication supabase_realtime add table public.multiplayer_tables;
+    end if;
+
+    if not exists (
+      select 1 from pg_publication_tables
+      where pubname = 'supabase_realtime'
+        and schemaname = 'public'
+        and tablename = 'multiplayer_table_seats'
+    ) then
+      alter publication supabase_realtime add table public.multiplayer_table_seats;
+    end if;
+  end if;
+end;
+$$;
 
 create or replace function public.handle_new_user()
 returns trigger
@@ -243,3 +376,70 @@ begin
   return query select v_new_credits, v_next_version;
 end;
 $$;
+
+create or replace function public.apply_multiplayer_credit_entries(
+  p_table_id uuid,
+  p_game_id text,
+  p_entries jsonb
+)
+returns table(profile_id uuid, credits numeric)
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_entry jsonb;
+  v_profile_id uuid;
+  v_bet numeric(12,2);
+  v_delta numeric(12,2);
+  v_credits numeric(12,2);
+  v_new_credits numeric(12,2);
+  v_outcome text;
+  v_action text;
+begin
+  for v_entry in select * from jsonb_array_elements(p_entries)
+  loop
+    v_profile_id := (v_entry ->> 'profileId')::uuid;
+    v_bet := coalesce(nullif(v_entry ->> 'bet', '')::numeric, 0);
+    v_delta := coalesce(nullif(v_entry ->> 'delta', '')::numeric, 0);
+    v_outcome := coalesce(nullif(v_entry ->> 'outcome', ''), 'played');
+    v_action := coalesce(nullif(v_entry ->> 'action', ''), 'multiplayer');
+
+    perform public.ensure_profile(v_profile_id, 'Player');
+
+    select profiles.credits
+    into v_credits
+    from public.profiles
+    where profiles.id = v_profile_id
+    for update;
+
+    v_new_credits := round(v_credits + v_delta, 2);
+
+    if v_new_credits < 0 then
+      raise exception 'insufficient_credits';
+    end if;
+
+    update public.profiles
+    set credits = v_new_credits,
+        updated_at = now()
+    where profiles.id = v_profile_id;
+
+    insert into public.game_history (profile_id, multiplayer_table_id, game_id, bet, delta, balance_after, outcome, action)
+    values (v_profile_id, p_table_id, p_game_id, v_bet, v_delta, v_new_credits, v_outcome, v_action);
+
+    profile_id := v_profile_id;
+    credits := v_new_credits;
+    return next;
+  end loop;
+end;
+$$;
+
+revoke execute on function public.ensure_profile(uuid, text) from anon, authenticated;
+revoke execute on function public.create_game_session(uuid, text, jsonb, text, numeric, numeric, text, text) from anon, authenticated;
+revoke execute on function public.apply_game_step(uuid, uuid, integer, text, jsonb, text, numeric, numeric, text, text) from anon, authenticated;
+revoke execute on function public.apply_multiplayer_credit_entries(uuid, text, jsonb) from anon, authenticated;
+
+grant execute on function public.ensure_profile(uuid, text) to service_role;
+grant execute on function public.create_game_session(uuid, text, jsonb, text, numeric, numeric, text, text) to service_role;
+grant execute on function public.apply_game_step(uuid, uuid, integer, text, jsonb, text, numeric, numeric, text, text) to service_role;
+grant execute on function public.apply_multiplayer_credit_entries(uuid, text, jsonb) to service_role;

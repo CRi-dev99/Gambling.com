@@ -7,7 +7,9 @@ const corsHeaders = {
 };
 
 const GAME_IDS = new Set(["blackjack", "poker", "solitaire", "slots", "corridor", "dice"]);
+const MULTIPLAYER_GAME_IDS = new Set(["blackjack", "poker", "dice"]);
 const MAX_BET = 10000;
+const TURN_TIMEOUT_SECONDS = 45;
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return json({}, 200);
@@ -32,6 +34,11 @@ Deno.serve(async (req) => {
 
     if (body.type === "profile") {
       return json({ profile });
+    }
+
+    if (String(body.type || "").startsWith("multiplayer:")) {
+      const result = await handleMultiplayer(admin, user, profile, body);
+      return json(result);
     }
 
     if (!GAME_IDS.has(body.gameId)) {
@@ -147,6 +154,905 @@ async function rpcSingle(client, fn, args) {
   const { data, error } = await client.rpc(fn, args).single();
   if (error) throw error;
   return data;
+}
+
+async function rpcRows(client, fn, args) {
+  const { data, error } = await client.rpc(fn, args);
+  if (error) throw error;
+  return data || [];
+}
+
+async function handleMultiplayer(admin, user, profile, body) {
+  switch (body.type) {
+    case "multiplayer:list":
+      return listMultiplayerTables(admin, user.id, body);
+    case "multiplayer:create":
+      return createMultiplayerTable(admin, user, profile, body);
+    case "multiplayer:join":
+      return joinMultiplayerTable(admin, user, profile, body);
+    case "multiplayer:ready":
+      return setMultiplayerReady(admin, user.id, profile, body);
+    case "multiplayer:start":
+      return startMultiplayerTable(admin, user.id, profile, body);
+    case "multiplayer:action":
+      return applyMultiplayerPlayerAction(admin, user.id, profile, body, false);
+    case "multiplayer:timeout":
+      return applyMultiplayerPlayerAction(admin, user.id, profile, body, true);
+    case "multiplayer:leave":
+      return leaveMultiplayerTable(admin, user.id, profile, body);
+    case "multiplayer:sync":
+      return syncMultiplayerTable(admin, user.id, profile, body);
+    default:
+      return { error: "unknown_multiplayer_request" };
+  }
+}
+
+async function listMultiplayerTables(admin, viewerId, body) {
+  let query = admin
+    .from("multiplayer_tables")
+    .select("*")
+    .eq("visibility", "public")
+    .in("status", ["waiting", "active"])
+    .order("updated_at", { ascending: false })
+    .limit(24);
+
+  if (body.gameId) {
+    const gameId = parseMultiplayerGameId(body.gameId);
+    query = query.eq("game_id", gameId);
+  }
+
+  const { data, error } = await query;
+  if (error) throw error;
+
+  const tables = [];
+  for (const table of data || []) {
+    tables.push(await hydrateMultiplayerTable(admin, table.id, viewerId, table));
+  }
+  return { tables };
+}
+
+async function createMultiplayerTable(admin, user, profile, body) {
+  const gameId = parseMultiplayerGameId(body.gameId);
+  const stake = parseBet(body.stake);
+  const maxPlayers = parseMaxPlayers(body.maxPlayers);
+  const visibility = body.visibility === "private" ? "private" : "public";
+  const inviteCode = await createInviteCode(admin);
+  const publicState = {
+    mode: "multiplayer",
+    gameId,
+    phase: "waiting",
+    status: "waiting",
+    stake,
+    message: "Waiting for players."
+  };
+
+  const { data: table, error: tableError } = await admin
+    .from("multiplayer_tables")
+    .insert({
+      game_id: gameId,
+      host_profile_id: user.id,
+      stake,
+      max_players: maxPlayers,
+      visibility,
+      invite_code: inviteCode,
+      public_state: publicState
+    })
+    .select("*")
+    .single();
+  if (tableError) throw tableError;
+
+  const { error: seatError } = await admin.from("multiplayer_table_seats").insert({
+    table_id: table.id,
+    profile_id: user.id,
+    seat_index: 0,
+    username: profile.username,
+    status: "ready"
+  });
+  if (seatError) throw seatError;
+
+  const { error: stateError } = await admin.from("multiplayer_table_state").insert({
+    table_id: table.id,
+    state: {
+      gameId,
+      phase: "waiting",
+      stake,
+      diceMode: normalizeDiceMode(body.diceMode),
+      message: "Waiting for players."
+    }
+  });
+  if (stateError) throw stateError;
+
+  return { profile, table: await hydrateMultiplayerTable(admin, table.id, user.id) };
+}
+
+async function joinMultiplayerTable(admin, user, profile, body) {
+  const table = body.tableId
+    ? await getMultiplayerTable(admin, String(body.tableId))
+    : await getMultiplayerTableByInvite(admin, String(body.inviteCode || ""));
+  if (!table) throw new Error("multiplayer_table_not_found");
+  if (table.status !== "waiting") throw new Error("table_already_started");
+
+  const seats = await getMultiplayerSeats(admin, table.id);
+  const existing = seats.find((seat) => seat.profile_id === user.id);
+  if (existing) return { profile, table: await hydrateMultiplayerTable(admin, table.id, user.id, table, seats) };
+  if (seats.length >= table.max_players) throw new Error("table_full");
+
+  const used = new Set(seats.map((seat) => Number(seat.seat_index)));
+  let seatIndex = 0;
+  while (used.has(seatIndex)) seatIndex += 1;
+
+  const { error } = await admin.from("multiplayer_table_seats").insert({
+    table_id: table.id,
+    profile_id: user.id,
+    seat_index: seatIndex,
+    username: profile.username,
+    status: "seated"
+  });
+  if (error) throw error;
+
+  await touchMultiplayerTable(admin, table.id);
+  return { profile, table: await hydrateMultiplayerTable(admin, table.id, user.id) };
+}
+
+async function setMultiplayerReady(admin, profileId, profile, body) {
+  const table = await requireMultiplayerTableForSeat(admin, String(body.tableId || ""), profileId);
+  if (table.status !== "waiting") throw new Error("table_already_started");
+  const ready = body.ready !== false;
+  const { error } = await admin
+    .from("multiplayer_table_seats")
+    .update({ status: ready ? "ready" : "seated", updated_at: new Date().toISOString() })
+    .eq("table_id", table.id)
+    .eq("profile_id", profileId);
+  if (error) throw error;
+  await touchMultiplayerTable(admin, table.id);
+  return { profile, table: await hydrateMultiplayerTable(admin, table.id, profileId) };
+}
+
+async function startMultiplayerTable(admin, profileId, profile, body) {
+  const table = await getMultiplayerTable(admin, String(body.tableId || ""));
+  if (!table) throw new Error("multiplayer_table_not_found");
+  if (table.host_profile_id !== profileId) throw new Error("host_only");
+  if (table.status !== "waiting") throw new Error("table_already_started");
+
+  const seats = await getMultiplayerSeats(admin, table.id);
+  const activeSeats = seats.filter((seat) => ["seated", "ready"].includes(seat.status));
+  if (activeSeats.length < 2) throw new Error("need_at_least_two_players");
+  if (activeSeats.some((seat) => seat.status !== "ready")) throw new Error("players_not_ready");
+
+  const entries = activeSeats.map((seat) => ({
+    profileId: seat.profile_id,
+    bet: Number(table.stake),
+    delta: -Number(table.stake),
+    outcome: "escrow",
+    action: "multiplayer_escrow"
+  }));
+  const credits = await rpcRows(admin, "apply_multiplayer_credit_entries", {
+    p_table_id: table.id,
+    p_game_id: table.game_id,
+    p_entries: entries
+  });
+
+  const setupState = await getMultiplayerPrivateState(admin, table.id);
+  const started = createMultiplayerState(table.game_id, Number(table.stake), activeSeats, setupState?.state?.diceMode);
+  const publicState = multiplayerPublicState(started, table, activeSeats, profileId);
+  const deadline = started.phase === "complete" ? null : turnDeadline();
+
+  await saveMultiplayerState(admin, table.id, started);
+  await admin
+    .from("multiplayer_table_seats")
+    .update({ status: "active", updated_at: new Date().toISOString() })
+    .eq("table_id", table.id)
+    .in("profile_id", activeSeats.map((seat) => seat.profile_id));
+
+  const { error } = await admin
+    .from("multiplayer_tables")
+    .update({
+      status: started.phase === "complete" ? "complete" : "active",
+      public_state: publicState,
+      turn_profile_id: started.phase === "complete" ? null : currentTurnProfileId(started),
+      turn_deadline_at: deadline,
+      version: Number(table.version) + 1,
+      updated_at: new Date().toISOString()
+    })
+    .eq("id", table.id);
+  if (error) throw error;
+
+  if (started.phase === "complete") {
+    await settleMultiplayerTable(admin, table.id, table.game_id, Number(table.stake), started);
+  }
+
+  return {
+    profile: profileWithCredits(profile, credits, profileId),
+    table: await hydrateMultiplayerTable(admin, table.id, profileId)
+  };
+}
+
+async function applyMultiplayerPlayerAction(admin, profileId, profile, body, timeout) {
+  const table = await requireMultiplayerTableForSeat(admin, String(body.tableId || ""), profileId);
+  if (table.status !== "active") throw new Error("table_not_active");
+
+  const stateRow = await getMultiplayerPrivateState(admin, table.id);
+  const state = stateRow?.state;
+  if (!state) throw new Error("multiplayer_state_not_found");
+  const actorProfileId = timeout ? currentTurnProfileId(state) : profileId;
+  if (!actorProfileId) throw new Error("no_active_turn");
+  if (!timeout && table.turn_profile_id !== profileId) throw new Error("not_your_turn");
+  if (timeout && table.turn_deadline_at && new Date(table.turn_deadline_at).getTime() > Date.now()) {
+    throw new Error("turn_deadline_not_reached");
+  }
+
+  const next = stepMultiplayerState(state, actorProfileId, body.action || {}, timeout);
+  const seats = await getMultiplayerSeats(admin, table.id);
+  const publicState = multiplayerPublicState(next, table, seats, profileId);
+  const complete = next.phase === "complete";
+  let credits = [];
+
+  await saveMultiplayerState(admin, table.id, next);
+  if (complete) {
+    credits = await settleMultiplayerTable(admin, table.id, table.game_id, Number(table.stake), next);
+  }
+
+  const { error } = await admin
+    .from("multiplayer_tables")
+    .update({
+      status: complete ? "complete" : "active",
+      public_state: publicState,
+      turn_profile_id: complete ? null : currentTurnProfileId(next),
+      turn_deadline_at: complete ? null : turnDeadline(),
+      version: Number(table.version) + 1,
+      updated_at: new Date().toISOString()
+    })
+    .eq("id", table.id);
+  if (error) throw error;
+
+  return {
+    profile: profileWithCredits(profile, credits, profileId),
+    table: await hydrateMultiplayerTable(admin, table.id, profileId)
+  };
+}
+
+async function leaveMultiplayerTable(admin, profileId, profile, body) {
+  const table = await requireMultiplayerTableForSeat(admin, String(body.tableId || ""), profileId);
+  if (table.status !== "waiting") throw new Error("cannot_leave_active_table");
+
+  const { error } = await admin
+    .from("multiplayer_table_seats")
+    .delete()
+    .eq("table_id", table.id)
+    .eq("profile_id", profileId);
+  if (error) throw error;
+
+  const seats = await getMultiplayerSeats(admin, table.id);
+  if (!seats.length) {
+    await admin.from("multiplayer_tables").update({ status: "cancelled", updated_at: new Date().toISOString() }).eq("id", table.id);
+    return { profile, table: null };
+  }
+
+  if (table.host_profile_id === profileId) {
+    await admin
+      .from("multiplayer_tables")
+      .update({ host_profile_id: seats[0].profile_id, updated_at: new Date().toISOString() })
+      .eq("id", table.id);
+  } else {
+    await touchMultiplayerTable(admin, table.id);
+  }
+
+  return { profile, table: null };
+}
+
+async function syncMultiplayerTable(admin, profileId, profile, body) {
+  const table = await requireMultiplayerTableForSeat(admin, String(body.tableId || ""), profileId);
+  return { profile, table: await hydrateMultiplayerTable(admin, table.id, profileId) };
+}
+
+async function getMultiplayerTable(admin, tableId) {
+  if (!tableId) return null;
+  const { data, error } = await admin.from("multiplayer_tables").select("*").eq("id", tableId).maybeSingle();
+  if (error) throw error;
+  return data;
+}
+
+async function getMultiplayerTableByInvite(admin, inviteCode) {
+  const normalized = normalizeInviteCode(inviteCode);
+  if (!normalized) return null;
+  const { data, error } = await admin.from("multiplayer_tables").select("*").eq("invite_code", normalized).maybeSingle();
+  if (error) throw error;
+  return data;
+}
+
+async function requireMultiplayerTableForSeat(admin, tableId, profileId) {
+  const table = await getMultiplayerTable(admin, tableId);
+  if (!table) throw new Error("multiplayer_table_not_found");
+  const seats = await getMultiplayerSeats(admin, table.id);
+  if (!seats.some((seat) => seat.profile_id === profileId && !["left", "abandoned"].includes(seat.status))) {
+    throw new Error("not_seated_at_table");
+  }
+  return table;
+}
+
+async function getMultiplayerSeats(admin, tableId) {
+  const { data, error } = await admin
+    .from("multiplayer_table_seats")
+    .select("*")
+    .eq("table_id", tableId)
+    .order("seat_index", { ascending: true });
+  if (error) throw error;
+  return data || [];
+}
+
+async function getMultiplayerPrivateState(admin, tableId) {
+  const { data, error } = await admin.from("multiplayer_table_state").select("*").eq("table_id", tableId).maybeSingle();
+  if (error) throw error;
+  return data;
+}
+
+async function saveMultiplayerState(admin, tableId, state) {
+  const { error } = await admin
+    .from("multiplayer_table_state")
+    .upsert({ table_id: tableId, state, updated_at: new Date().toISOString() });
+  if (error) throw error;
+}
+
+async function touchMultiplayerTable(admin, tableId) {
+  const { error } = await admin
+    .from("multiplayer_tables")
+    .update({ updated_at: new Date().toISOString() })
+    .eq("id", tableId);
+  if (error) throw error;
+}
+
+async function hydrateMultiplayerTable(admin, tableId, viewerId, tableRow = null, seatsRow = null) {
+  const table = tableRow || await getMultiplayerTable(admin, tableId);
+  if (!table) return null;
+  const seats = seatsRow || await getMultiplayerSeats(admin, table.id);
+  let publicState = table.public_state || {};
+
+  if (table.status !== "waiting") {
+    const stateRow = await getMultiplayerPrivateState(admin, table.id);
+    if (stateRow?.state) {
+      publicState = multiplayerPublicState(stateRow.state, table, seats, viewerId);
+    }
+  } else {
+    publicState = {
+      ...publicState,
+      mode: "multiplayer",
+      tableId: table.id,
+      gameId: table.game_id,
+      phase: "waiting",
+      status: table.status,
+      stake: Number(table.stake),
+      maxPlayers: table.max_players,
+      inviteCode: table.invite_code,
+      message: seats.length >= 2 ? "Ready up, then the host can start." : "Waiting for another player.",
+      seats: seats.map(publicSeat)
+    };
+  }
+
+  return formatMultiplayerTable(table, seats, publicState, viewerId);
+}
+
+function formatMultiplayerTable(table, seats, publicState, viewerId) {
+  const viewerSeat = seats.find((seat) => seat.profile_id === viewerId) || null;
+  return {
+    id: table.id,
+    gameId: table.game_id,
+    hostProfileId: table.host_profile_id,
+    stake: Number(table.stake),
+    maxPlayers: table.max_players,
+    status: table.status,
+    visibility: table.visibility,
+    inviteCode: table.invite_code,
+    turnProfileId: table.turn_profile_id,
+    turnDeadlineAt: table.turn_deadline_at,
+    version: table.version,
+    isHost: table.host_profile_id === viewerId,
+    viewerSeat: viewerSeat ? publicSeat(viewerSeat) : null,
+    seats: seats.map(publicSeat),
+    publicState
+  };
+}
+
+function publicSeat(seat) {
+  return {
+    profileId: seat.profile_id,
+    username: seat.username,
+    seatIndex: Number(seat.seat_index),
+    status: seat.status,
+    settledDelta: Number(seat.settled_delta || 0)
+  };
+}
+
+async function createInviteCode(admin) {
+  for (let attempt = 0; attempt < 12; attempt += 1) {
+    const code = randomCode(6);
+    const existing = await getMultiplayerTableByInvite(admin, code);
+    if (!existing) return code;
+  }
+  throw new Error("could_not_create_invite_code");
+}
+
+function randomCode(length) {
+  const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  let code = "";
+  for (let i = 0; i < length; i += 1) {
+    code += alphabet[secureRandom(alphabet.length)];
+  }
+  return code;
+}
+
+function normalizeInviteCode(value) {
+  return String(value || "").trim().toUpperCase().replace(/[^A-Z0-9]/g, "");
+}
+
+function parseMultiplayerGameId(gameId) {
+  const normalized = String(gameId || "");
+  if (!MULTIPLAYER_GAME_IDS.has(normalized)) throw new Error("unknown_multiplayer_game");
+  return normalized;
+}
+
+function parseMaxPlayers(raw) {
+  const value = Number(raw || 6);
+  if (!Number.isInteger(value) || value < 2 || value > 6) throw new Error("max_players_must_be_2_to_6");
+  return value;
+}
+
+function normalizeDiceMode(raw) {
+  const mode = String(raw || "high").toLowerCase();
+  return ["high", "low", "doubles"].includes(mode) ? mode : "high";
+}
+
+function turnDeadline() {
+  return new Date(Date.now() + TURN_TIMEOUT_SECONDS * 1000).toISOString();
+}
+
+function profileWithCredits(profile, rows, profileId) {
+  const row = (rows || []).find((item) => item.profile_id === profileId || item.profileId === profileId);
+  return row ? { ...profile, credits: Number(row.credits) } : profile;
+}
+
+async function settleMultiplayerTable(admin, tableId, gameId, stake, state) {
+  const currentSeats = await getMultiplayerSeats(admin, tableId);
+  const alreadySettled = state.players.every((player) =>
+    currentSeats.some((seat) => seat.profile_id === player.profileId && seat.status === "settled")
+  );
+  if (alreadySettled) return [];
+
+  const settlements = multiplayerSettlements(state, stake);
+  const entries = settlements.map((item) => ({
+    profileId: item.profileId,
+    bet: stake,
+    delta: item.payout,
+    outcome: item.outcome,
+    action: "multiplayer_settle"
+  }));
+  const credits = await rpcRows(admin, "apply_multiplayer_credit_entries", {
+    p_table_id: tableId,
+    p_game_id: gameId,
+    p_entries: entries
+  });
+
+  for (const settlement of settlements) {
+    await admin
+      .from("multiplayer_table_seats")
+      .update({
+        status: "settled",
+        settled_delta: roundMoney(settlement.payout - stake),
+        updated_at: new Date().toISOString()
+      })
+      .eq("table_id", tableId)
+      .eq("profile_id", settlement.profileId);
+  }
+
+  return credits;
+}
+
+function createMultiplayerState(gameId, stake, seats, diceMode = "high") {
+  if (gameId === "blackjack") return createMultiplayerBlackjack(stake, seats);
+  if (gameId === "poker") return createMultiplayerPoker(stake, seats);
+  if (gameId === "dice") return createMultiplayerDice(stake, seats, diceMode);
+  throw new Error("unknown_multiplayer_game");
+}
+
+function stepMultiplayerState(state, profileId, action, timeout) {
+  if (state.gameId === "blackjack") return stepMultiplayerBlackjack(state, profileId, action, timeout);
+  if (state.gameId === "poker") return stepMultiplayerPoker(state, profileId, action, timeout);
+  if (state.gameId === "dice") return stepMultiplayerDice(state, profileId, action, timeout);
+  throw new Error("unknown_multiplayer_game");
+}
+
+function currentTurnProfileId(state) {
+  if (state.phase === "complete") return null;
+  return state.players?.[state.turnIndex]?.profileId || null;
+}
+
+function createMultiplayerBlackjack(stake, seats) {
+  const state = {
+    mode: "multiplayer",
+    gameId: "blackjack",
+    phase: "player_turn",
+    stake,
+    deck: shuffle(createDeck()),
+    dealerHand: [],
+    players: seats.map((seat) => ({
+      profileId: seat.profile_id,
+      username: seat.username,
+      seatIndex: Number(seat.seat_index),
+      hand: [],
+      status: "playing",
+      outcome: null,
+      payout: 0
+    })),
+    turnIndex: 0,
+    message: "Blackjack table started."
+  };
+
+  for (const player of state.players) player.hand.push(draw(state), draw(state));
+  state.dealerHand.push(draw(state), draw(state));
+
+  for (const player of state.players) {
+    if (isBlackjack(player.hand)) player.status = "blackjack";
+  }
+
+  return advanceMultiplayerBlackjack(state);
+}
+
+function stepMultiplayerBlackjack(state, profileId, action, timeout) {
+  const player = state.players[state.turnIndex];
+  if (!player || player.profileId !== profileId) throw new Error("not_your_turn");
+  if (state.phase !== "player_turn") throw new Error("blackjack_table_not_active");
+
+  const type = timeout ? "stand" : String(action?.type || action || "").toLowerCase();
+  if (type === "hit") {
+    if (scoreBlackjack(player.hand).total >= 21) throw new Error("stand_required_at_21");
+    player.hand.push(draw(state));
+    const total = scoreBlackjack(player.hand).total;
+    if (total > 21) {
+      player.status = "busted";
+      state.message = `${player.username} busted.`;
+      return advanceMultiplayerBlackjack(state);
+    }
+    if (total === 21) {
+      player.status = "stood";
+      state.message = `${player.username} has 21.`;
+      return advanceMultiplayerBlackjack(state);
+    }
+    state.message = `${player.username} hit.`;
+    return state;
+  }
+
+  if (type !== "stand") throw new Error("invalid_blackjack_action");
+  player.status = timeout ? "timed_out" : "stood";
+  state.message = timeout ? `${player.username} timed out and stood.` : `${player.username} stood.`;
+  return advanceMultiplayerBlackjack(state);
+}
+
+function advanceMultiplayerBlackjack(state) {
+  const nextIndex = state.players.findIndex((player) => player.status === "playing");
+  if (nextIndex >= 0) {
+    state.turnIndex = nextIndex;
+    state.phase = "player_turn";
+    return state;
+  }
+
+  while (scoreBlackjack(state.dealerHand).total < 17) state.dealerHand.push(draw(state));
+  const dealerTotal = scoreBlackjack(state.dealerHand).total;
+  const dealerNatural = isBlackjack(state.dealerHand);
+
+  for (const player of state.players) {
+    const playerTotal = scoreBlackjack(player.hand).total;
+    if (player.status === "busted") {
+      player.outcome = "lose";
+      player.payout = 0;
+    } else if (dealerNatural && !isBlackjack(player.hand)) {
+      player.outcome = "lose";
+      player.payout = 0;
+    } else if (isBlackjack(player.hand) && !dealerNatural) {
+      player.outcome = "blackjack";
+      player.payout = roundMoney(state.stake * 2.5);
+    } else if (dealerTotal > 21 || playerTotal > dealerTotal) {
+      player.outcome = "win";
+      player.payout = roundMoney(state.stake * 2);
+    } else if (playerTotal === dealerTotal) {
+      player.outcome = "push";
+      player.payout = roundMoney(state.stake);
+    } else {
+      player.outcome = "lose";
+      player.payout = 0;
+    }
+    player.status = "settled";
+  }
+
+  state.phase = "complete";
+  state.turnIndex = -1;
+  state.message = "Dealer resolved the table.";
+  return state;
+}
+
+function createMultiplayerPoker(stake, seats) {
+  const deck = shuffle(createPokerDeck());
+  const players = seats.map((seat) => {
+    const hand = deck.splice(0, 5);
+    return {
+      profileId: seat.profile_id,
+      username: seat.username,
+      seatIndex: Number(seat.seat_index),
+      hand,
+      held: [false, false, false, false, false],
+      status: "holding",
+      result: null,
+      outcome: null,
+      payout: 0
+    };
+  });
+
+  return {
+    mode: "multiplayer",
+    gameId: "poker",
+    phase: "holding",
+    stake,
+    deck,
+    players,
+    turnIndex: 0,
+    message: "Choose holds, then draw once."
+  };
+}
+
+function stepMultiplayerPoker(state, profileId, action, timeout) {
+  const player = state.players[state.turnIndex];
+  if (!player || player.profileId !== profileId) throw new Error("not_your_turn");
+  if (state.phase !== "holding") throw new Error("poker_table_not_active");
+
+  const type = timeout ? "draw" : String(action?.type || action || "").toLowerCase();
+  if (type === "togglehold") {
+    const index = Number(action.index);
+    if (!Number.isInteger(index) || index < 0 || index > 4) throw new Error("invalid_card_index");
+    player.held[index] = !player.held[index];
+    state.message = player.held[index] ? "Card held." : "Card released.";
+    return state;
+  }
+
+  if (type !== "draw") throw new Error("invalid_poker_action");
+  for (let i = 0; i < 5; i += 1) {
+    if (!player.held[i]) player.hand[i] = state.deck.pop();
+  }
+  player.result = scorePokerCompetitive(player.hand);
+  player.status = timeout ? "timed_out" : "drawn";
+  state.message = timeout ? `${player.username} timed out and drew.` : `${player.username} drew.`;
+  return advanceMultiplayerPoker(state);
+}
+
+function advanceMultiplayerPoker(state) {
+  const nextIndex = state.players.findIndex((player) => player.status === "holding");
+  if (nextIndex >= 0) {
+    state.turnIndex = nextIndex;
+    return state;
+  }
+
+  const best = state.players.reduce((leader, player) => {
+    const result = player.result || scorePokerCompetitive(player.hand);
+    player.result = result;
+    if (!leader || comparePokerCompetitive(result, leader.result) > 0) return player;
+    return leader;
+  }, null);
+  const winners = state.players.filter((player) => comparePokerCompetitive(player.result, best.result) === 0);
+  const payout = roundMoney((state.stake * state.players.length) / winners.length);
+
+  for (const player of state.players) {
+    if (winners.includes(player)) {
+      player.outcome = "win";
+      player.payout = payout;
+    } else {
+      player.outcome = "lose";
+      player.payout = 0;
+    }
+    player.status = "settled";
+  }
+
+  state.phase = "complete";
+  state.turnIndex = -1;
+  state.message = winners.length > 1 ? "Showdown split pot." : `${winners[0].username} won the pot.`;
+  return state;
+}
+
+function createMultiplayerDice(stake, seats, diceMode) {
+  return {
+    mode: "multiplayer",
+    gameId: "dice",
+    phase: "rolling",
+    stake,
+    diceMode: normalizeDiceMode(diceMode),
+    players: seats.map((seat) => ({
+      profileId: seat.profile_id,
+      username: seat.username,
+      seatIndex: Number(seat.seat_index),
+      dice: [],
+      total: 0,
+      status: "waiting",
+      outcome: null,
+      payout: 0
+    })),
+    turnIndex: 0,
+    message: "Roll once against the table."
+  };
+}
+
+function stepMultiplayerDice(state, profileId, action, timeout) {
+  const player = state.players[state.turnIndex];
+  if (!player || player.profileId !== profileId) throw new Error("not_your_turn");
+  if (state.phase !== "rolling") throw new Error("dice_table_not_active");
+  const type = String(action?.type || "roll").toLowerCase();
+  if (!timeout && type !== "roll") throw new Error("invalid_dice_action");
+
+  player.dice = [secureRandom(6) + 1, secureRandom(6) + 1];
+  player.total = player.dice[0] + player.dice[1];
+  player.status = timeout ? "timed_out" : "rolled";
+  state.message = timeout ? `${player.username} timed out and rolled.` : `${player.username} rolled.`;
+  return advanceMultiplayerDice(state);
+}
+
+function advanceMultiplayerDice(state) {
+  const nextIndex = state.players.findIndex((player) => player.status === "waiting");
+  if (nextIndex >= 0) {
+    state.turnIndex = nextIndex;
+    return state;
+  }
+
+  const winners = diceWinners(state);
+  const payout = roundMoney((state.stake * state.players.length) / winners.length);
+  for (const player of state.players) {
+    if (winners.includes(player)) {
+      player.outcome = "win";
+      player.payout = payout;
+    } else {
+      player.outcome = "lose";
+      player.payout = 0;
+    }
+    player.status = "settled";
+  }
+  state.phase = "complete";
+  state.turnIndex = -1;
+  state.message = winners.length > 1 ? "Dice pot split." : `${winners[0].username} won the dice pot.`;
+  return state;
+}
+
+function diceWinners(state) {
+  if (state.diceMode === "low") {
+    const low = Math.min(...state.players.map((player) => player.total));
+    return state.players.filter((player) => player.total === low);
+  }
+
+  if (state.diceMode === "doubles") {
+    const doubles = state.players.filter((player) => player.dice[0] === player.dice[1]);
+    if (doubles.length) {
+      const bestDouble = Math.max(...doubles.map((player) => player.dice[0]));
+      return doubles.filter((player) => player.dice[0] === bestDouble);
+    }
+  }
+
+  const high = Math.max(...state.players.map((player) => player.total));
+  return state.players.filter((player) => player.total === high);
+}
+
+function multiplayerPublicState(state, table, seats, viewerId) {
+  const base = {
+    mode: "multiplayer",
+    tableId: table.id,
+    gameId: table.game_id,
+    phase: state.phase,
+    status: state.phase === "complete" ? "complete" : "active",
+    stake: Number(table.stake),
+    bet: Number(table.stake),
+    maxPlayers: table.max_players,
+    inviteCode: table.invite_code,
+    turnProfileId: currentTurnProfileId(state),
+    turnDeadlineAt: table.turn_deadline_at,
+    secondsPerTurn: TURN_TIMEOUT_SECONDS,
+    message: state.message || "",
+    seats: seats.map(publicSeat),
+    players: state.players.map((player) => publicMultiplayerPlayer(state, player, viewerId))
+  };
+
+  if (state.gameId === "blackjack") {
+    const hideHole = state.phase !== "complete" && state.dealerHand.length > 1;
+    const dealerHand = hideHole ? [state.dealerHand[0], { hidden: true }] : state.dealerHand;
+    return {
+      ...base,
+      dealerHand,
+      dealerValue: hideHole ? scoreBlackjack([state.dealerHand[0]]).total : scoreBlackjack(state.dealerHand).total
+    };
+  }
+
+  if (state.gameId === "dice") {
+    return { ...base, diceMode: state.diceMode };
+  }
+
+  return base;
+}
+
+function publicMultiplayerPlayer(state, player, viewerId) {
+  const isViewer = player.profileId === viewerId;
+  const common = {
+    profileId: player.profileId,
+    username: player.username,
+    seatIndex: player.seatIndex,
+    status: player.status,
+    outcome: player.outcome,
+    payout: Number(player.payout || 0),
+    isTurn: currentTurnProfileId(state) === player.profileId,
+    isYou: isViewer
+  };
+
+  if (state.gameId === "blackjack") {
+    return {
+      ...common,
+      hand: player.hand,
+      value: scoreBlackjack(player.hand).total
+    };
+  }
+
+  if (state.gameId === "poker") {
+    const visible = isViewer || state.phase === "complete";
+    return {
+      ...common,
+      hand: visible ? player.hand : Array.from({ length: 5 }, () => ({ hidden: true })),
+      held: visible ? player.held : [],
+      result: state.phase === "complete" ? player.result : null
+    };
+  }
+
+  return {
+    ...common,
+    dice: player.dice,
+    total: player.total
+  };
+}
+
+function multiplayerSettlements(state, stake) {
+  return state.players.map((player) => ({
+    profileId: player.profileId,
+    payout: roundMoney(Number(player.payout || 0)),
+    outcome: player.outcome || "lose",
+    net: roundMoney(Number(player.payout || 0) - stake)
+  }));
+}
+
+function scorePokerCompetitive(hand) {
+  const values = hand.map((card) => card.value).sort((a, b) => a - b);
+  const counts = new Map();
+  for (const value of values) counts.set(value, (counts.get(value) || 0) + 1);
+  const groups = [...counts.entries()]
+    .map(([value, count]) => ({ value, count }))
+    .sort((a, b) => b.count - a.count || b.value - a.value);
+  const flush = hand.every((card) => card.suit === hand[0].suit);
+  const wheel = values.join(",") === "2,3,4,5,14";
+  const unique = [...new Set(values)];
+  const straight = unique.length === 5 && (wheel || values[4] - values[0] === 4);
+  const straightHigh = wheel ? 5 : values[4];
+
+  if (straight && flush && straightHigh === 14) return { strength: 10, tiebreak: [14], label: "Royal Flush" };
+  if (straight && flush) return { strength: 9, tiebreak: [straightHigh], label: "Straight Flush" };
+  if (groups[0].count === 4) return { strength: 8, tiebreak: [groups[0].value, groups[1].value], label: "Four of a Kind" };
+  if (groups[0].count === 3 && groups[1]?.count === 2) return { strength: 7, tiebreak: [groups[0].value, groups[1].value], label: "Full House" };
+  if (flush) return { strength: 6, tiebreak: values.slice().sort((a, b) => b - a), label: "Flush" };
+  if (straight) return { strength: 5, tiebreak: [straightHigh], label: "Straight" };
+  if (groups[0].count === 3) return { strength: 4, tiebreak: [groups[0].value, ...groups.slice(1).map((item) => item.value).sort((a, b) => b - a)], label: "Three of a Kind" };
+  if (groups[0].count === 2 && groups[1]?.count === 2) return { strength: 3, tiebreak: [groups[0].value, groups[1].value, groups[2].value], label: "Two Pair" };
+  if (groups[0].count === 2) return { strength: 2, tiebreak: [groups[0].value, ...groups.slice(1).map((item) => item.value).sort((a, b) => b - a)], label: "Pair" };
+  return { strength: 1, tiebreak: values.slice().sort((a, b) => b - a), label: "High Card" };
+}
+
+function comparePokerCompetitive(left, right) {
+  if (left.strength !== right.strength) return left.strength - right.strength;
+  const length = Math.max(left.tiebreak.length, right.tiebreak.length);
+  for (let i = 0; i < length; i += 1) {
+    const diff = Number(left.tiebreak[i] || 0) - Number(right.tiebreak[i] || 0);
+    if (diff) return diff;
+  }
+  return 0;
+}
+
+function roundMoney(value) {
+  return Math.round(Number(value || 0) * 100) / 100;
 }
 
 function json(body, status = 200) {

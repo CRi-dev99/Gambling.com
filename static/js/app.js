@@ -2,11 +2,13 @@ import {
   ensureProfile,
   getCurrentSession,
   isSupabaseConfigured,
+  multiplayerRequest,
   onAuthChange,
   playGameServer,
   signIn,
   signOut,
-  signUp
+  signUp,
+  subscribeToMultiplayerTable
 } from "./supabaseClient.js";
 
 const games = [
@@ -115,6 +117,7 @@ function iconSvg(name) {
 }
 
 const betMemory = new Map(games.map((game) => [game.id, 10]));
+const multiplayerGameIds = new Set(["blackjack", "poker", "dice"]);
 
 const elements = {
   authScreen: document.querySelector("#authScreen"),
@@ -146,6 +149,8 @@ let authMode = "signin";
 let profile = null;
 let currentGame = null;
 let unsubscribeAuth = () => {};
+let unsubscribeMultiplayerTable = () => {};
+let multiplayerSyncTimer = null;
 let loadingProfileForUserId = null;
 
 init();
@@ -261,6 +266,7 @@ function enterApp() {
 }
 
 function showAuth() {
+  clearMultiplayerSubscription();
   profile = null;
   currentGame = null;
   elements.authScreen.classList.remove("is-hidden");
@@ -309,7 +315,12 @@ function renderDashboard() {
             <h3>${escapeHtml(game.title)}</h3>
             <p>${escapeHtml(game.description)}</p>
           </div>
-          <button class="primary-action" type="button" data-game="${game.id}">Play</button>
+          <div class="card-actions">
+            <button class="primary-action" type="button" data-game="${game.id}">Play Solo</button>
+            ${multiplayerGameIds.has(game.id) ? `
+              <button class="secondary-action" type="button" data-multiplayer="${game.id}">Multiplayer</button>
+            ` : ""}
+          </div>
         </article>
       `
     )
@@ -318,9 +329,13 @@ function renderDashboard() {
   elements.dashboardView.querySelectorAll("[data-game]").forEach((button) => {
     button.addEventListener("click", () => openGame(button.dataset.game));
   });
+  elements.dashboardView.querySelectorAll("[data-multiplayer]").forEach((button) => {
+    button.addEventListener("click", () => openMultiplayerLobby(button.dataset.multiplayer));
+  });
 }
 
 function showDashboard() {
+  clearMultiplayerSubscription();
   currentGame = null;
   elements.viewTitle.textContent = "Casino Dashboard";
   elements.dashboardView.classList.remove("is-hidden");
@@ -334,8 +349,10 @@ async function openGame(gameId) {
   if (!meta) return;
 
   try {
+    clearMultiplayerSubscription();
     currentGame = {
       meta,
+      mode: "solo",
       state: createInitialPublicState(gameId),
       sessionId: null,
       message: ""
@@ -352,6 +369,29 @@ async function openGame(gameId) {
   }
 }
 
+async function openMultiplayerLobby(gameId) {
+  const meta = games.find((game) => game.id === gameId);
+  if (!meta || !multiplayerGameIds.has(gameId)) return;
+
+  clearMultiplayerSubscription();
+  currentGame = {
+    meta,
+    mode: "multiplayer",
+    multiplayerView: "lobby",
+    table: null,
+    tables: [],
+    message: ""
+  };
+  elements.viewTitle.textContent = `${meta.title} Multiplayer`;
+  elements.gameTitle.textContent = `${meta.title} Multiplayer`;
+  elements.gameTypeLabel.textContent = "Real-player table";
+  elements.dashboardView.classList.add("is-hidden");
+  elements.gameView.classList.remove("is-hidden");
+  markActiveNav(gameId);
+  renderCurrentGame();
+  await loadMultiplayerTables();
+}
+
 function markActiveNav(gameId) {
   elements.gameNav.querySelectorAll("[data-dashboard]").forEach((button) => {
     button.classList.toggle("is-active", gameId === "dashboard");
@@ -363,6 +403,10 @@ function markActiveNav(gameId) {
 
 function renderCurrentGame() {
   if (!currentGame) return;
+  if (currentGame.mode === "multiplayer") {
+    renderMultiplayerView();
+    return;
+  }
 
   const publicState = currentGame.state;
   const content = renderGameSurface(currentGame.meta.id, publicState);
@@ -379,6 +423,461 @@ function renderCurrentGame() {
   `;
 
   bindGameControls(publicState);
+}
+
+function renderMultiplayerView() {
+  if (!currentGame) return;
+
+  if (currentGame.multiplayerView === "table" && currentGame.table) {
+    renderMultiplayerTable();
+  } else {
+    renderMultiplayerLobby();
+  }
+}
+
+function renderMultiplayerLobby() {
+  elements.gameRoot.innerHTML = `
+    <div class="game-layout multiplayer-layout">
+      <section class="play-surface">
+        <div class="table-zone">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">Public lobby</p>
+              <h4>${escapeHtml(currentGame.meta.title)} tables</h4>
+            </div>
+            <button class="game-button" type="button" data-refresh-lobby>Refresh</button>
+          </div>
+          <div class="lobby-list">
+            ${renderLobbyTables()}
+          </div>
+        </div>
+      </section>
+      <aside class="control-panel">
+        <div class="control-stack">
+          <button class="game-button" type="button" data-open-solo>Play solo instead</button>
+        </div>
+        <div class="control-stack">
+          <p class="eyebrow">Create table</p>
+          <label class="bet-control">
+            <span>Stake</span>
+            <input id="mpStake" type="number" min="1" max="10000" step="1" value="${betMemory.get(currentGame.meta.id) || 10}">
+          </label>
+          <label class="bet-control">
+            <span>Seats</span>
+            <input id="mpMaxPlayers" type="number" min="2" max="6" step="1" value="6">
+          </label>
+          <label class="bet-control">
+            <span>Visibility</span>
+            <select id="mpVisibility">
+              <option value="public">Public lobby</option>
+              <option value="private">Invite only</option>
+            </select>
+          </label>
+          ${currentGame.meta.id === "dice" ? `
+            <label class="bet-control">
+              <span>Dice mode</span>
+              <select id="mpDiceMode">
+                <option value="high">High total wins</option>
+                <option value="low">Low total wins</option>
+                <option value="doubles">Best doubles win</option>
+              </select>
+            </label>
+          ` : ""}
+          <button class="game-button is-primary" type="button" data-create-table>Create table</button>
+        </div>
+        <div class="control-stack">
+          <p class="eyebrow">Invite code</p>
+          <label class="bet-control">
+            <span>Code</span>
+            <input id="mpInviteCode" type="text" maxlength="12" placeholder="ABC123">
+          </label>
+          <button class="game-button" type="button" data-join-code>Join by code</button>
+        </div>
+        ${renderRoundMessage({ message: currentGame.message })}
+      </aside>
+    </div>
+  `;
+
+  bindMultiplayerControls();
+}
+
+function renderLobbyTables() {
+  if (!currentGame.tables?.length) {
+    return `<p class="empty-state">No public tables yet. Create one or join by invite code.</p>`;
+  }
+
+  return currentGame.tables.map((table) => `
+    <article class="lobby-table">
+      <div>
+        <p class="eyebrow">${escapeHtml(table.status)}</p>
+        <h4>${escapeHtml(gameTitle(table.gameId))}</h4>
+        <p>${table.seats.length}/${table.maxPlayers} seats · ${table.stake} credits</p>
+      </div>
+      <button class="game-button" type="button" data-join-table="${escapeHtml(table.id)}" ${table.status !== "waiting" ? "disabled" : ""}>Join</button>
+    </article>
+  `).join("");
+}
+
+function renderMultiplayerTable() {
+  const table = currentGame.table;
+  const state = table.publicState || {};
+  elements.gameRoot.innerHTML = `
+    <div class="game-layout multiplayer-layout">
+      <section class="play-surface">
+        <div class="table-zone">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">Table ${escapeHtml(table.inviteCode)}</p>
+              <h4>${escapeHtml(gameTitle(table.gameId))} · ${escapeHtml(table.status)}</h4>
+            </div>
+            <button class="game-button" type="button" data-sync-table>Sync</button>
+          </div>
+          ${renderSeatList(table)}
+        </div>
+        ${renderMultiplayerGameSurface(table, state)}
+      </section>
+      <aside class="control-panel">
+        ${renderMultiplayerStats(table, state)}
+        ${renderMultiplayerTableControls(table, state)}
+        ${renderRoundMessage({ message: currentGame.message || state.message })}
+      </aside>
+    </div>
+  `;
+
+  bindMultiplayerControls();
+}
+
+function renderSeatList(table) {
+  const seats = Array.from({ length: table.maxPlayers }, (_, index) =>
+    table.seats.find((seat) => seat.seatIndex === index) || null
+  );
+
+  return `
+    <div class="seat-grid">
+      ${seats.map((seat, index) => `
+        <div class="seat-card ${seat?.profileId === profile?.id ? "is-you" : ""}">
+          <span>${index + 1}</span>
+          <strong>${escapeHtml(seat?.username || "Open seat")}</strong>
+          <small>${escapeHtml(seat?.status || "open")}</small>
+        </div>
+      `).join("")}
+    </div>
+  `;
+}
+
+function renderMultiplayerGameSurface(table, state) {
+  if (table.status === "waiting") {
+    return `
+      <div class="table-zone">
+        <h4>Waiting room</h4>
+        <p>Share invite code <strong>${escapeHtml(table.inviteCode)}</strong> or wait for players from the public lobby.</p>
+      </div>
+    `;
+  }
+
+  if (table.gameId === "blackjack") return renderMultiplayerBlackjack(state);
+  if (table.gameId === "poker") return renderMultiplayerPoker(state);
+  if (table.gameId === "dice") return renderMultiplayerDice(state);
+  return `<div class="table-zone"><p>Multiplayer table unavailable.</p></div>`;
+}
+
+function renderMultiplayerBlackjack(state) {
+  return `
+    ${renderHandZone("Dealer", state.dealerHand || [], state.dealerValue)}
+    ${(state.players || []).map((player) => renderHandZone(
+      `${player.username}${player.isYou ? " (You)" : ""}`,
+      player.hand || [],
+      player.value
+    )).join("")}
+  `;
+}
+
+function renderMultiplayerPoker(state) {
+  const canToggle = state.turnProfileId === profile?.id && state.phase === "holding";
+  return `
+    ${(state.players || []).map((player) => `
+      <div class="hand-zone">
+        <h4>${escapeHtml(player.username)}${player.isYou ? " (You)" : ""} ${player.result ? `· ${escapeHtml(player.result.label)}` : ""}</h4>
+        <div class="card-row">
+          ${(player.hand || []).map((card, index) => renderCard(card, {
+            held: player.held?.[index],
+            action: canToggle && player.isYou ? `data-mp-action="toggleHold" data-index="${index}"` : ""
+          })).join("")}
+        </div>
+      </div>
+    `).join("")}
+  `;
+}
+
+function renderMultiplayerDice(state) {
+  return `
+    <div class="table-zone">
+      <h4>${escapeHtml(diceModeLabel(state.diceMode || "high"))}</h4>
+      <div class="dice-player-grid">
+        ${(state.players || []).map((player) => `
+          <div class="dice-player">
+            <strong>${escapeHtml(player.username)}${player.isYou ? " (You)" : ""}</strong>
+            <div class="dice-row">${renderDiceFaces(player.dice)}</div>
+            <span>${player.total || 0}</span>
+          </div>
+        `).join("")}
+      </div>
+    </div>
+  `;
+}
+
+function renderMultiplayerStats(table, state) {
+  return `
+    <div class="stat-grid">
+      <div class="stat"><span>Stake</span><strong>${table.stake}</strong></div>
+      <div class="stat"><span>Seats</span><strong>${table.seats.length}/${table.maxPlayers}</strong></div>
+      <div class="stat"><span>Turn</span><strong>${escapeHtml(turnLabel(state))}</strong></div>
+      <div class="stat"><span>Balance</span><strong>${profile?.credits ?? 0}</strong></div>
+    </div>
+  `;
+}
+
+function renderMultiplayerTableControls(table, state) {
+  if (table.status === "waiting") {
+    const ready = table.viewerSeat?.status === "ready";
+    const canStart = table.isHost && table.seats.length >= 2 && table.seats.every((seat) => seat.status === "ready");
+    return `
+      <div class="button-row">
+        <button class="game-button is-primary" type="button" data-ready="${ready ? "false" : "true"}">${ready ? "Unready" : "Ready"}</button>
+        <button class="game-button" type="button" data-start-table ${canStart ? "" : "disabled"}>Start</button>
+        <button class="game-button" type="button" data-leave-table>Leave</button>
+      </div>
+    `;
+  }
+
+  if (table.status === "complete") {
+    return `
+      <div class="button-row">
+        <button class="game-button is-primary" type="button" data-back-lobby>Back to lobby</button>
+      </div>
+    `;
+  }
+
+  const yourTurn = state.turnProfileId === profile?.id;
+  const timeoutAvailable = Boolean(state.turnDeadlineAt && new Date(state.turnDeadlineAt).getTime() <= Date.now());
+  let actionButtons = "";
+  if (table.gameId === "blackjack") {
+    actionButtons = `
+      <button class="game-button" type="button" data-mp-action="hit" ${yourTurn ? "" : "disabled"}>Hit</button>
+      <button class="game-button" type="button" data-mp-action="stand" ${yourTurn ? "" : "disabled"}>Stand</button>
+    `;
+  } else if (table.gameId === "poker") {
+    actionButtons = `<button class="game-button" type="button" data-mp-action="draw" ${yourTurn ? "" : "disabled"}>Draw</button>`;
+  } else if (table.gameId === "dice") {
+    actionButtons = `<button class="game-button" type="button" data-mp-action="roll" ${yourTurn ? "" : "disabled"}>Roll</button>`;
+  }
+
+  return `
+    <div class="button-row">
+      ${actionButtons}
+      <button class="game-button" type="button" data-timeout-table ${timeoutAvailable ? "" : "disabled"}>Apply timeout</button>
+    </div>
+  `;
+}
+
+function bindMultiplayerControls() {
+  elements.gameRoot.querySelector("[data-open-solo]")?.addEventListener("click", () => openGame(currentGame.meta.id));
+  elements.gameRoot.querySelector("[data-refresh-lobby]")?.addEventListener("click", loadMultiplayerTables);
+  elements.gameRoot.querySelector("[data-create-table]")?.addEventListener("click", createMultiplayerTableFromUi);
+  elements.gameRoot.querySelector("[data-join-code]")?.addEventListener("click", joinMultiplayerByCodeFromUi);
+  elements.gameRoot.querySelector("[data-ready]")?.addEventListener("click", (event) => setReadyFromUi(event.currentTarget.dataset.ready === "true"));
+  elements.gameRoot.querySelector("[data-start-table]")?.addEventListener("click", startMultiplayerFromUi);
+  elements.gameRoot.querySelector("[data-leave-table]")?.addEventListener("click", leaveMultiplayerFromUi);
+  elements.gameRoot.querySelector("[data-sync-table]")?.addEventListener("click", syncMultiplayerTableFromUi);
+  elements.gameRoot.querySelector("[data-timeout-table]")?.addEventListener("click", timeoutMultiplayerFromUi);
+  elements.gameRoot.querySelector("[data-back-lobby]")?.addEventListener("click", () => openMultiplayerLobby(currentGame.meta.id));
+  elements.gameRoot.querySelectorAll("[data-join-table]").forEach((button) => {
+    button.addEventListener("click", () => joinMultiplayerTableFromUi(button.dataset.joinTable));
+  });
+  elements.gameRoot.querySelectorAll("[data-mp-action]").forEach((button) => {
+    button.addEventListener("click", () => runMultiplayerAction(actionFromMultiplayerButton(button)));
+  });
+}
+
+async function loadMultiplayerTables() {
+  if (!currentGame || currentGame.mode !== "multiplayer") return;
+  await transitionMultiplayer(async () => {
+    const result = await multiplayerRequest({ type: "multiplayer:list", gameId: currentGame.meta.id });
+    currentGame.tables = result.tables || [];
+  });
+}
+
+async function createMultiplayerTableFromUi() {
+  await transitionMultiplayer(async () => {
+    const stake = Number(elements.gameRoot.querySelector("#mpStake")?.value || 0);
+    if (!validateMultiplayerStake(stake)) return;
+    betMemory.set(currentGame.meta.id, stake);
+    const result = await multiplayerRequest({
+      type: "multiplayer:create",
+      gameId: currentGame.meta.id,
+      stake,
+      maxPlayers: Number(elements.gameRoot.querySelector("#mpMaxPlayers")?.value || 6),
+      visibility: elements.gameRoot.querySelector("#mpVisibility")?.value || "public",
+      diceMode: elements.gameRoot.querySelector("#mpDiceMode")?.value || "high"
+    });
+    acceptMultiplayerResult(result);
+  });
+}
+
+async function joinMultiplayerByCodeFromUi() {
+  const inviteCode = elements.gameRoot.querySelector("#mpInviteCode")?.value || "";
+  await joinMultiplayerTableFromUi(null, inviteCode);
+}
+
+async function joinMultiplayerTableFromUi(tableId, inviteCode = "") {
+  await transitionMultiplayer(async () => {
+    const result = await multiplayerRequest({
+      type: "multiplayer:join",
+      gameId: currentGame.meta.id,
+      tableId,
+      inviteCode
+    });
+    acceptMultiplayerResult(result);
+  });
+}
+
+async function setReadyFromUi(ready) {
+  await runMultiplayerRequest({ type: "multiplayer:ready", ready });
+}
+
+async function startMultiplayerFromUi() {
+  await runMultiplayerRequest({ type: "multiplayer:start" });
+}
+
+async function leaveMultiplayerFromUi() {
+  await transitionMultiplayer(async () => {
+    const result = await multiplayerRequest({
+      type: "multiplayer:leave",
+      gameId: currentGame.meta.id,
+      tableId: currentGame.table?.id
+    });
+    acceptMultiplayerResult(result);
+    if (!result.table) {
+      clearMultiplayerSubscription();
+      currentGame.multiplayerView = "lobby";
+      await loadMultiplayerTables();
+    }
+  });
+}
+
+async function syncMultiplayerTableFromUi() {
+  if (!currentGame?.table?.id) return;
+  await runMultiplayerRequest({ type: "multiplayer:sync" });
+}
+
+async function timeoutMultiplayerFromUi() {
+  await runMultiplayerRequest({ type: "multiplayer:timeout" });
+}
+
+async function runMultiplayerAction(action) {
+  await runMultiplayerRequest({ type: "multiplayer:action", action });
+}
+
+async function runMultiplayerRequest(payload) {
+  await transitionMultiplayer(async () => {
+    const result = await multiplayerRequest({
+      ...payload,
+      gameId: currentGame.meta.id,
+      tableId: currentGame.table?.id
+    });
+    acceptMultiplayerResult(result);
+  });
+}
+
+async function transitionMultiplayer(task) {
+  try {
+    currentGame.message = "";
+    await task();
+  } catch (error) {
+    currentGame.message = error.message;
+  } finally {
+    renderCurrentGame();
+  }
+}
+
+function acceptMultiplayerResult(result) {
+  if (result.profile) {
+    profile = result.profile;
+    updateWallet();
+  }
+  if (Object.prototype.hasOwnProperty.call(result, "table")) {
+    currentGame.table = result.table;
+    if (result.table) {
+      currentGame.multiplayerView = "table";
+      subscribeToCurrentMultiplayerTable(result.table.id);
+    }
+  }
+  if (result.tables) {
+    currentGame.tables = result.tables;
+  }
+}
+
+function subscribeToCurrentMultiplayerTable(tableId) {
+  if (!tableId || currentGame.subscribedTableId === tableId) return;
+  clearMultiplayerSubscription();
+  currentGame.subscribedTableId = tableId;
+  unsubscribeMultiplayerTable = subscribeToMultiplayerTable(tableId, () => {
+    window.clearTimeout(multiplayerSyncTimer);
+    multiplayerSyncTimer = window.setTimeout(() => {
+      if (currentGame?.mode === "multiplayer" && currentGame.table?.id === tableId) {
+        syncMultiplayerTableFromUi();
+      }
+    }, 250);
+  });
+}
+
+function clearMultiplayerSubscription() {
+  window.clearTimeout(multiplayerSyncTimer);
+  multiplayerSyncTimer = null;
+  unsubscribeMultiplayerTable();
+  unsubscribeMultiplayerTable = () => {};
+  if (currentGame) currentGame.subscribedTableId = null;
+}
+
+function actionFromMultiplayerButton(button) {
+  const type = button.dataset.mpAction;
+  if (type === "toggleHold") return { type, index: Number(button.dataset.index) };
+  return { type };
+}
+
+function validateMultiplayerStake(stake) {
+  if (!Number.isInteger(stake) || stake <= 0) {
+    currentGame.message = "Choose a positive whole-credit stake.";
+    renderCurrentGame();
+    return false;
+  }
+  if (stake > profile.credits) {
+    currentGame.message = "Your stake cannot be higher than your credit balance.";
+    renderCurrentGame();
+    return false;
+  }
+  return true;
+}
+
+function turnLabel(state) {
+  const current = (state.players || []).find((player) => player.profileId === state.turnProfileId);
+  if (!current) return state.phase || "waiting";
+  const seconds = state.turnDeadlineAt
+    ? Math.max(0, Math.ceil((new Date(state.turnDeadlineAt).getTime() - Date.now()) / 1000))
+    : 0;
+  return `${current.isYou ? "You" : current.username} · ${seconds}s`;
+}
+
+function gameTitle(gameId) {
+  return games.find((game) => game.id === gameId)?.title || gameId;
+}
+
+function diceModeLabel(mode) {
+  return {
+    high: "High total wins",
+    low: "Low total wins",
+    doubles: "Best doubles win"
+  }[mode] || "High total wins";
 }
 
 function renderGameSurface(gameId, state) {
@@ -920,4 +1419,7 @@ function escapeHtml(value) {
     .replaceAll("'", "&#039;");
 }
 
-window.addEventListener("beforeunload", () => unsubscribeAuth());
+window.addEventListener("beforeunload", () => {
+  unsubscribeAuth();
+  clearMultiplayerSubscription();
+});

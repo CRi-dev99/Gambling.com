@@ -76,6 +76,36 @@ export async function playGameServer(payload) {
   };
 }
 
+export async function multiplayerRequest(payload) {
+  const data = await invokeGameServer(payload);
+  return {
+    ...data,
+    profile: data.profile ? normalizeProfile(data.profile) : undefined
+  };
+}
+
+export function subscribeToMultiplayerTable(tableId, callback) {
+  if (!supabase || !tableId) return () => {};
+
+  const channel = supabase
+    .channel(`multiplayer-table:${tableId}`)
+    .on(
+      "postgres_changes",
+      { event: "*", schema: "public", table: "multiplayer_tables", filter: `id=eq.${tableId}` },
+      callback
+    )
+    .on(
+      "postgres_changes",
+      { event: "*", schema: "public", table: "multiplayer_table_seats", filter: `table_id=eq.${tableId}` },
+      callback
+    )
+    .subscribe();
+
+  return () => {
+    supabase.removeChannel(channel);
+  };
+}
+
 async function invokeGameServer(payload) {
   if (!supabase) throw new Error("Supabase is not configured.");
   const { data, error } = await supabase.functions.invoke("play-game", {

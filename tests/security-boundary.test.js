@@ -10,6 +10,8 @@ test("browser client does not mutate credits directly", async () => {
   assert.equal(app.includes("logGameRound"), false);
   assert.equal(client.includes(".from(\"profiles\")\n    .update"), false);
   assert.equal(client.includes(".from(\"game_history\").insert"), false);
+  assert.equal(client.includes(".from(\"multiplayer_tables\").insert"), false);
+  assert.equal(client.includes(".from(\"multiplayer_table_state\")"), false);
   assert.equal(client.includes("functions.invoke(\"play-game\""), true);
 });
 
@@ -23,6 +25,21 @@ test("database schema blocks direct client credit writes", async () => {
   assert.equal(schema.includes("revoke insert, update, delete on public.profiles from anon, authenticated"), true);
   assert.equal(schema.includes("revoke insert, update, delete on public.game_history from anon, authenticated"), true);
   assert.equal(schema.includes("revoke all on public.game_sessions from anon, authenticated"), true);
+  assert.equal(schema.includes("revoke execute on function public.create_game_session"), true);
+  assert.equal(schema.includes("revoke execute on function public.apply_game_step"), true);
+});
+
+test("multiplayer schema keeps private state and writes server-owned", async () => {
+  const schema = await readFile(new URL("../supabase/schema.sql", import.meta.url), "utf8");
+
+  assert.equal(schema.includes("create table if not exists public.multiplayer_tables"), true);
+  assert.equal(schema.includes("create table if not exists public.multiplayer_table_seats"), true);
+  assert.equal(schema.includes("create table if not exists public.multiplayer_table_state"), true);
+  assert.equal(schema.includes("revoke all on public.multiplayer_table_state from anon, authenticated"), true);
+  assert.equal(schema.includes("revoke insert, update, delete on public.multiplayer_tables from anon, authenticated"), true);
+  assert.equal(schema.includes("revoke insert, update, delete on public.multiplayer_table_seats from anon, authenticated"), true);
+  assert.equal(schema.includes("apply_multiplayer_credit_entries"), true);
+  assert.equal(schema.includes("revoke execute on function public.apply_multiplayer_credit_entries"), true);
 });
 
 test("edge function owns gameplay and atomic credit application", async () => {
@@ -33,4 +50,16 @@ test("edge function owns gameplay and atomic credit application", async () => {
   assert.equal(edge.includes("apply_game_step"), true);
   assert.equal(edge.includes("crypto.getRandomValues"), true);
   assert.equal(edge.includes("updateProfileCredits"), false);
+});
+
+test("edge function owns multiplayer matchmaking and settlement", async () => {
+  const edge = await readFile(new URL("../supabase/functions/play-game/index.ts", import.meta.url), "utf8");
+
+  assert.equal(edge.includes("multiplayer:create"), true);
+  assert.equal(edge.includes("multiplayer:join"), true);
+  assert.equal(edge.includes("multiplayer:timeout"), true);
+  assert.equal(edge.includes("TURN_TIMEOUT_SECONDS"), true);
+  assert.equal(edge.includes("apply_multiplayer_credit_entries"), true);
+  assert.equal(edge.includes("multiplayer_table_state"), true);
+  assert.equal(edge.includes("settleMultiplayerTable"), true);
 });

@@ -27,11 +27,14 @@ Then open `http://localhost:8000`.
 ## Games
 
 - Blackjack: single player against automated dealer rules.
+- Blackjack multiplayer: optional 2-6 player shared-dealer table with escrowed fictional-credit stakes.
 - Five-card Poker: solo draw poker.
+- Five-card Poker multiplayer: optional 2-6 player competitive draw poker with showdown pot settlement.
 - Solitaire: simplified Klondike.
 - Slots: weighted three-reel machine.
 - Corridor: five-room door minigame.
 - Dice Duel: player dice against house dice.
+- Dice Duel multiplayer: optional 2-6 player table for high, low, or doubles dice modes.
 
 ## Security Model
 
@@ -39,6 +42,8 @@ Then open `http://localhost:8000`.
 - RLS lets users read only their own profile/history.
 - Direct browser inserts/updates/deletes for profiles, credit history, and private game sessions are revoked.
 - Private game state is stored in `game_sessions`, which has no client read policy.
+- Multiplayer table metadata/seats are readable through RLS for lobby/table views, but private decks/hands live in `multiplayer_table_state`, which has no client read grants.
+- Multiplayer stakes are escrowed and settled by the Edge Function through `apply_multiplayer_credit_entries`.
 - The `play-game` Edge Function uses server-side randomness and a service key that must never be exposed to the browser.
 - Credit changes and history entries are applied with database functions so they happen together.
 

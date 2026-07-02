@@ -31,7 +31,8 @@ body {
 }
 
 button,
-input {
+input,
+select {
   font: inherit;
 }
 
@@ -176,7 +177,8 @@ h3 {
 }
 
 .field input,
-.bet-control input {
+.bet-control input,
+.bet-control select {
   width: 100%;
   min-height: 44px;
   border: 1px solid var(--line);
@@ -187,6 +189,7 @@ h3 {
 }
 
 .primary-action,
+.secondary-action,
 .ghost-action,
 .icon-action,
 .game-button,
@@ -204,6 +207,7 @@ h3 {
 }
 
 .ghost-action,
+.secondary-action,
 .game-button,
 .chip-button {
   border: 1px solid var(--line);
@@ -212,6 +216,7 @@ h3 {
 }
 
 .ghost-action:hover,
+.secondary-action:hover,
 .game-button:hover,
 .chip-button:hover {
   border-color: var(--gold);
@@ -420,8 +425,15 @@ h3 {
   line-height: 1.48;
 }
 
-.game-card .primary-action {
+.game-card .primary-action,
+.game-card .secondary-action {
   margin-top: 8px;
+  width: 100%;
+}
+
+.card-actions {
+  display: grid;
+  gap: 8px;
 }
 
 .game-root {
@@ -450,6 +462,76 @@ h3 {
 
 .control-panel {
   align-self: start;
+}
+
+.multiplayer-layout .play-surface {
+  min-height: 520px;
+}
+
+.section-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.lobby-list,
+.seat-grid,
+.dice-player-grid {
+  display: grid;
+  gap: 12px;
+}
+
+.lobby-table {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(15, 14, 13, 0.72);
+}
+
+.lobby-table h4,
+.lobby-table p {
+  margin: 0;
+}
+
+.empty-state {
+  margin: 0;
+  color: var(--muted);
+}
+
+.seat-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.seat-card,
+.dice-player {
+  display: grid;
+  gap: 6px;
+  min-height: 88px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(15, 14, 13, 0.66);
+}
+
+.seat-card.is-you {
+  border-color: var(--gold);
+  background: rgba(212, 175, 55, 0.1);
+}
+
+.seat-card span,
+.seat-card small,
+.dice-player span {
+  color: var(--muted);
+  font-weight: 800;
+}
+
+.dice-player-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
 .bet-control {
@@ -658,6 +740,11 @@ h3 {
   }
 
   .dashboard-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .seat-grid,
+  .dice-player-grid {
     grid-template-columns: 1fr;
   }
 }
