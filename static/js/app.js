@@ -421,6 +421,17 @@ function renderCurrentGame() {
   const publicState = currentGame.state;
   const content = renderGameSurface(currentGame.meta.id, publicState);
 
+  if (currentGame.meta.id === "blackjack") {
+    elements.gameRoot.innerHTML = `
+      <div class="blackjack-game">
+        ${content.surface}
+      </div>
+    `;
+    bindGameControls(publicState);
+    lockPendingControls();
+    return;
+  }
+
   elements.gameRoot.innerHTML = `
     <div class="game-layout">
       <section class="play-surface">${content.surface}</section>
@@ -973,20 +984,155 @@ function renderGameSurface(gameId, state) {
 function renderBlackjack(state) {
   const canAct = state.phase === "player_turn";
   const canHit = canAct && Number(state.playerValue || 0) < 21;
+  const canDeal = !canAct;
+  const currentBet = betMemory.get("blackjack") || 10;
+  const tableBet = Number(state.bet || currentBet || 0);
+  const playerValue = Number(state.playerValue || 0);
+  const dealerValue = Number(state.dealerValue || 0);
+  const statusLabel = state.phase === "player_turn" ? "In play" : state.phase === "round_over" ? "Round over" : "Place bet";
+  const blackjackAnimations = getBlackjackAnimationPlan(state);
+
   return {
     surface: `
-      ${renderHandZone("Dealer", state.dealerHand, state.dealerValue)}
-      ${renderHandZone("Player", state.playerHand, state.playerValue)}
+      <section class="blackjack-table" aria-label="Blackjack table">
+        <div class="blackjack-felt-mark" aria-hidden="true">
+          <span>Blackjack pays 3:2</span>
+        </div>
+
+        <div class="blackjack-bank">
+          <span>Bank</span>
+          <strong>${formatCredits(profile?.credits ?? 0)}</strong>
+        </div>
+
+        <div class="blackjack-count">
+          <strong>${formatCredits(profile?.credits ?? 0)}</strong>
+          <span class="mini-card-stack" aria-hidden="true">${iconSvg("poker")}</span>
+        </div>
+
+        <div class="blackjack-hand blackjack-dealer">
+          <div class="blackjack-card-row">
+            ${(state.dealerHand || []).map((card, index) => renderBlackjackCard(card, index, "dealer", blackjackAnimations.dealer[index])).join("") || renderBlackjackEmptyCards()}
+          </div>
+          <div class="blackjack-score ${dealerValue ? "" : "is-empty"}">
+            <strong>${dealerValue || "-"}</strong>
+            <span>Dealer</span>
+          </div>
+        </div>
+
+        <div class="blackjack-action blackjack-action-left">
+          <button class="blackjack-control-button" type="button" data-action="hit" ${canHit ? "" : "disabled"}>
+            <span class="blackjack-button-icon" aria-hidden="true">+</span>
+            Hit
+          </button>
+        </div>
+
+        <div class="blackjack-pot">
+          <div class="blackjack-chip">
+            <span>Bet</span>
+            <strong>${tableBet}</strong>
+          </div>
+          <strong class="blackjack-pot-value">${formatCredits(tableBet)}</strong>
+        </div>
+
+        <div class="blackjack-action blackjack-action-right">
+          <button class="blackjack-control-button" type="button" data-action="split" disabled>Split</button>
+          <button class="blackjack-control-button" type="button" data-action="stand" ${canAct ? "" : "disabled"}>
+            <span class="blackjack-button-icon" aria-hidden="true">!</span>
+            Stand
+          </button>
+        </div>
+
+        <div class="blackjack-hand blackjack-player">
+          <div class="blackjack-card-row">
+            ${(state.playerHand || []).map((card, index) => renderBlackjackCard(card, index, "player", blackjackAnimations.player[index])).join("") || renderBlackjackEmptyCards()}
+          </div>
+          <div class="blackjack-score ${playerValue ? "" : "is-empty"}">
+            <strong>${playerValue || "-"}</strong>
+            <span>Player</span>
+          </div>
+        </div>
+
+        <div class="blackjack-bet-panel">
+          <div class="blackjack-status">
+            <span>${escapeHtml(statusLabel)}</span>
+            <strong>${formatSignedCredits(blackjackRoundNet(state))}</strong>
+          </div>
+          ${renderBetControl(canAct)}
+          <button class="blackjack-deal-button" type="button" data-start-round ${canDeal ? "" : "disabled"}>Deal</button>
+        </div>
+
+        ${renderBlackjackResultOverlay(state)}
+        ${renderBlackjackTableMessage(state)}
+      </section>
     `,
-    controls: `
-      ${renderBetControl(state.phase === "player_turn")}
-      <div class="button-row">
-        <button class="game-button is-primary" type="button" data-start-round ${canAct ? "disabled" : ""}>Deal</button>
-        <button class="game-button" type="button" data-action="hit" ${canHit ? "" : "disabled"}>Hit</button>
-        <button class="game-button" type="button" data-action="stand" ${canAct ? "" : "disabled"}>Stand</button>
-      </div>
-    `
+    controls: ""
   };
+}
+
+function renderBlackjackResultOverlay(state) {
+  if (state.phase !== "round_over") return "";
+
+  const net = blackjackRoundNet(state);
+  const resultClass = net > 0 ? "is-win" : net < 0 ? "is-loss" : "is-push";
+  const title = net > 0
+    ? `You won ${formatCredits(net)} credits`
+    : net < 0
+      ? `You lost ${formatCredits(Math.abs(net))} credits`
+      : "Push. No credits lost";
+  const message = state.message || "Round complete.";
+
+  return `
+    <div class="blackjack-result-overlay ${resultClass}" role="dialog" aria-live="assertive" aria-label="Blackjack round result">
+      <div class="blackjack-result-banner">
+        <p class="eyebrow">${escapeHtml(blackjackOutcomeLabel(state.outcome))}</p>
+        <strong>${escapeHtml(title)}</strong>
+        <span>${escapeHtml(message)}</span>
+        <div class="blackjack-result-actions">
+          <button class="blackjack-result-button is-primary" type="button" data-start-round>Play again</button>
+          <button class="blackjack-result-button" type="button" data-exit-game>Exit</button>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function renderBlackjackTableMessage(state) {
+  if (state.phase === "round_over") return "";
+  const message = currentGame.message || state.validationMessage || state.lastError || state.error || "";
+  if (!message) return "";
+  return `<p class="blackjack-table-message">${escapeHtml(message)}</p>`;
+}
+
+function blackjackRoundNet(state) {
+  const bet = Number(state.bet || 0);
+  const delta = Number(state.roundDelta || 0);
+  switch (state.outcome) {
+    case "win":
+    case "dealer_bust":
+      return delta - bet;
+    case "lose":
+    case "player_bust":
+      return -bet;
+    case "blackjack":
+    case "dealer_blackjack":
+      return delta;
+    case "push":
+      return 0;
+    default:
+      return delta;
+  }
+}
+
+function blackjackOutcomeLabel(outcome) {
+  return {
+    blackjack: "Blackjack",
+    dealer_blackjack: "Dealer blackjack",
+    dealer_bust: "Dealer busted",
+    player_bust: "Bust",
+    push: "Push",
+    win: "Win",
+    lose: "Loss"
+  }[outcome] || "Round over";
 }
 
 function renderPoker(state) {
@@ -1170,6 +1316,10 @@ function bindGameControls(publicState) {
     button.addEventListener("click", () => startRoundFromUi());
   });
 
+  elements.gameRoot.querySelectorAll("[data-exit-game]").forEach((button) => {
+    button.addEventListener("click", showDashboard);
+  });
+
   elements.gameRoot.querySelectorAll("[data-action]").forEach((button) => {
     button.addEventListener("click", () => {
       const action = actionFromButton(button, publicState);
@@ -1181,6 +1331,10 @@ function bindGameControls(publicState) {
 async function startRoundFromUi() {
   const bet = readBet();
   if (!validateBet(bet)) return;
+
+  if (currentGame.meta.id === "blackjack") {
+    currentGame.blackjackResetAnimationsOnNextState = true;
+  }
 
   await transitionState(() => playGameServer({
     type: "start",
@@ -1226,6 +1380,10 @@ async function transitionState(nextStateFactory) {
     if (currentGame !== gameRef || gameRef.pendingToken !== token) return;
     profile = result.profile || profile;
     gameRef.sessionId = result.sessionId || gameRef.sessionId;
+    if (gameRef.meta.id === "blackjack" && gameRef.blackjackResetAnimationsOnNextState && result.publicState) {
+      gameRef.blackjackAnimationSnapshot = createBlackjackAnimationSnapshot();
+      gameRef.blackjackResetAnimationsOnNextState = false;
+    }
     gameRef.state = result.publicState || gameRef.state;
     updateWallet();
   } catch (error) {
@@ -1393,6 +1551,109 @@ function renderHandZone(title, cards, value) {
   `;
 }
 
+function renderBlackjackEmptyCards() {
+  return `
+    <div class="blackjack-card is-placeholder"></div>
+    <div class="blackjack-card is-placeholder"></div>
+  `;
+}
+
+function createBlackjackAnimationSnapshot() {
+  return { dealer: [], player: [] };
+}
+
+function getBlackjackAnimationPlan(state) {
+  const previous = currentGame?.blackjackAnimationSnapshot || createBlackjackAnimationSnapshot();
+  const current = {
+    dealer: (state.dealerHand || []).map((card, index) => blackjackCardIdentity(card, index)),
+    player: (state.playerHand || []).map((card, index) => blackjackCardIdentity(card, index))
+  };
+  const plan = createBlackjackAnimationSnapshot();
+  const dealCandidates = [];
+
+  ["player", "dealer"].forEach((owner) => {
+    current[owner].forEach((identity, index) => {
+      if (!identity) return;
+
+      const priorIdentity = previous[owner]?.[index] || "";
+      const holeReveal = isBlackjackHoleReveal(priorIdentity, identity);
+      const shouldDeal = !priorIdentity || (priorIdentity !== identity && !holeReveal);
+
+      if (shouldDeal) {
+        dealCandidates.push({ owner, index, order: blackjackDealOrder(owner, index) });
+        return;
+      }
+
+      if (holeReveal) {
+        plan[owner][index] = { type: "reveal" };
+      }
+    });
+  });
+
+  dealCandidates
+    .sort((a, b) => a.order - b.order)
+    .forEach((candidate, sequence) => {
+      plan[candidate.owner][candidate.index] = { type: "deal", sequence };
+    });
+
+  if (currentGame) {
+    currentGame.blackjackAnimationSnapshot = current;
+  }
+
+  return plan;
+}
+
+function blackjackCardIdentity(card, index) {
+  if (!card) return "";
+  if (card.hidden || card.faceUp === false) return `hidden:${index}`;
+  return `${card.rank || ""}:${card.suit || ""}:${card.value ?? ""}`;
+}
+
+function isBlackjackHoleReveal(previousIdentity, currentIdentity) {
+  return previousIdentity.startsWith("hidden:") && !currentIdentity.startsWith("hidden:");
+}
+
+function blackjackDealOrder(owner, index) {
+  if (index === 0) return owner === "player" ? 0 : 1;
+  if (index === 1) return owner === "player" ? 2 : 3;
+  return owner === "player" ? index + 4 : index + 5;
+}
+
+function blackjackCardAnimationAttributes(owner, animation) {
+  if (!animation) return "";
+  if (animation.type === "reveal") return " is-revealing";
+
+  const delayStep = Math.min(Number(animation.sequence || 0), 4);
+  return ` is-dealing deal-to-${owner} deal-delay-${delayStep}`;
+}
+
+function renderBlackjackCard(card, index, owner, animation) {
+  const hidden = !card || card.hidden || card.faceUp === false;
+  const tiltClass = `tilt-${index % 5}`;
+  const animationClass = blackjackCardAnimationAttributes(owner, animation);
+
+  if (hidden) {
+    return `
+      <div class="blackjack-card is-back ${tiltClass}${animationClass}">
+        <span>G</span>
+      </div>
+    `;
+  }
+
+  const suit = card.suit || "";
+  const red = suit === "hearts" || suit === "diamonds";
+  const rank = escapeHtml(card.rank || "");
+  const symbol = suitSymbol(suit);
+
+  return `
+    <div class="blackjack-card ${red ? "is-red" : "is-black"} ${tiltClass}${animationClass}">
+      <span class="card-corner card-corner-top"><strong>${rank}</strong><small>${symbol}</small></span>
+      <span class="card-face-symbol">${symbol}</span>
+      <span class="card-corner card-corner-bottom"><strong>${rank}</strong><small>${symbol}</small></span>
+    </div>
+  `;
+}
+
 function renderCard(card, options = {}) {
   if (!card || card.hidden || card.faceUp === false) {
     if (options.action) {
@@ -1471,6 +1732,15 @@ function suitInitial(suit) {
   }[suit] || "";
 }
 
+function suitSymbol(suit) {
+  return {
+    hearts: "&hearts;",
+    diamonds: "&diams;",
+    clubs: "&clubs;",
+    spades: "&spades;"
+  }[suit] || "";
+}
+
 function suitLabel(suit) {
   return {
     hearts: "Hearts",
@@ -1480,8 +1750,17 @@ function suitLabel(suit) {
   }[suit] || suit;
 }
 
+function formatCredits(value) {
+  return Number(value || 0).toLocaleString();
+}
+
+function formatSignedCredits(value) {
+  const number = Number(value || 0);
+  return `${number > 0 ? "+" : ""}${formatCredits(number)}`;
+}
+
 function updateWallet() {
-  elements.creditBalance.textContent = Number(profile?.credits || 0).toLocaleString();
+  elements.creditBalance.textContent = formatCredits(profile?.credits || 0);
 }
 
 function showAuthMessage(message, isError = false) {
