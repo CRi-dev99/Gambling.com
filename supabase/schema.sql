@@ -187,6 +187,15 @@ grant select on public.game_history to authenticated;
 grant select on public.multiplayer_tables to authenticated;
 grant select on public.multiplayer_table_seats to authenticated;
 
+grant usage on schema public to service_role;
+grant select, insert, update, delete on public.profiles to service_role;
+grant select, insert, update, delete on public.game_history to service_role;
+grant select, insert, update, delete on public.game_sessions to service_role;
+grant select, insert, update, delete on public.multiplayer_tables to service_role;
+grant select, insert, update, delete on public.multiplayer_table_seats to service_role;
+grant select, insert, update, delete on public.multiplayer_table_state to service_role;
+grant usage, select on all sequences in schema public to service_role;
+
 revoke insert, update, delete on public.profiles from anon, authenticated;
 revoke insert, update, delete on public.game_history from anon, authenticated;
 revoke all on public.game_sessions from anon, authenticated;
@@ -231,7 +240,7 @@ begin
     coalesce(nullif(new.raw_user_meta_data ->> 'username', ''), split_part(new.email, '@', 1), 'Player'),
     1000
   )
-  on conflict (id) do nothing;
+  on conflict on constraint profiles_pkey do nothing;
   return new;
 end;
 $$;
@@ -251,7 +260,7 @@ as $$
 begin
   insert into public.profiles (id, username, credits)
   values (p_profile_id, coalesce(nullif(p_username, ''), 'Player'), 1000)
-  on conflict (id) do nothing;
+  on conflict on constraint profiles_pkey do nothing;
 
   return query
     select profiles.id, profiles.username, profiles.credits
@@ -350,14 +359,14 @@ begin
   set state = p_state,
       status = p_status,
       bet = p_bet,
-      version = version + 1,
+      version = game_sessions.version + 1,
       updated_at = now()
-  where id = p_session_id
-    and profile_id = p_profile_id
-    and game_id = p_game_id
-    and status = 'active'
-    and version = p_expected_version
-  returning version into v_next_version;
+  where game_sessions.id = p_session_id
+    and game_sessions.profile_id = p_profile_id
+    and game_sessions.game_id = p_game_id
+    and game_sessions.status = 'active'
+    and game_sessions.version = p_expected_version
+  returning game_sessions.version into v_next_version;
 
   if v_next_version is null then
     raise exception 'stale_or_closed_game_session';
@@ -434,12 +443,247 @@ begin
 end;
 $$;
 
+create or replace function public.apply_multiplayer_credit_entries_versioned(
+  p_table_id uuid,
+  p_game_id text,
+  p_entries jsonb,
+  p_table_version integer
+)
+returns table(profile_id uuid, credits numeric, table_version integer)
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_entry jsonb;
+  v_profile_id uuid;
+  v_bet numeric(12,2);
+  v_delta numeric(12,2);
+  v_credits numeric(12,2);
+  v_new_credits numeric(12,2);
+  v_outcome text;
+  v_action text;
+begin
+  for v_entry in select * from jsonb_array_elements(p_entries)
+  loop
+    v_profile_id := (v_entry ->> 'profileId')::uuid;
+    v_bet := coalesce(nullif(v_entry ->> 'bet', '')::numeric, 0);
+    v_delta := coalesce(nullif(v_entry ->> 'delta', '')::numeric, 0);
+    v_outcome := coalesce(nullif(v_entry ->> 'outcome', ''), 'played');
+    v_action := coalesce(nullif(v_entry ->> 'action', ''), 'multiplayer');
+
+    perform public.ensure_profile(v_profile_id, 'Player');
+
+    select profiles.credits
+    into v_credits
+    from public.profiles
+    where profiles.id = v_profile_id
+    for update;
+
+    v_new_credits := round(v_credits + v_delta, 2);
+
+    if v_new_credits < 0 then
+      raise exception 'insufficient_credits';
+    end if;
+
+    update public.profiles
+    set credits = v_new_credits,
+        updated_at = now()
+    where profiles.id = v_profile_id;
+
+    insert into public.game_history (profile_id, multiplayer_table_id, game_id, bet, delta, balance_after, outcome, action)
+    values (v_profile_id, p_table_id, p_game_id, v_bet, v_delta, v_new_credits, v_outcome, v_action);
+
+    profile_id := v_profile_id;
+    credits := v_new_credits;
+    table_version := p_table_version;
+    return next;
+  end loop;
+end;
+$$;
+
+create or replace function public.start_multiplayer_table_round(
+  p_table_id uuid,
+  p_expected_version integer,
+  p_game_id text,
+  p_state jsonb,
+  p_public_state jsonb,
+  p_turn_profile_id uuid,
+  p_turn_deadline_at timestamptz,
+  p_status text,
+  p_entries jsonb
+)
+returns table(profile_id uuid, credits numeric, table_version integer)
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_table public.multiplayer_tables%rowtype;
+  v_changed integer;
+  v_next_version integer;
+begin
+  select tables.*
+  into v_table
+  from public.multiplayer_tables tables
+  where tables.id = p_table_id
+  for update;
+
+  if v_table.id is null then
+    raise exception 'multiplayer_table_not_found';
+  end if;
+
+  if v_table.status <> 'waiting' or v_table.version <> p_expected_version or v_table.game_id <> p_game_id then
+    raise exception 'stale_multiplayer_table';
+  end if;
+
+  if p_status not in ('active', 'complete') then
+    raise exception 'invalid_multiplayer_status';
+  end if;
+
+  update public.multiplayer_table_seats seats
+  set status = 'active',
+      updated_at = now()
+  from (
+    select (entry ->> 'profileId')::uuid as profile_id
+    from jsonb_array_elements(p_entries) entry
+  ) entries
+  where seats.table_id = p_table_id
+    and seats.profile_id = entries.profile_id
+    and seats.status in ('seated', 'ready');
+
+  get diagnostics v_changed = row_count;
+  if v_changed <> jsonb_array_length(p_entries) then
+    raise exception 'multiplayer_seats_changed';
+  end if;
+
+  insert into public.multiplayer_table_state (table_id, state, updated_at)
+  values (p_table_id, p_state, now())
+  on conflict (table_id) do update
+  set state = excluded.state,
+      updated_at = excluded.updated_at;
+
+  v_next_version := v_table.version + 1;
+
+  update public.multiplayer_tables tables
+  set status = p_status,
+      public_state = p_public_state,
+      turn_profile_id = p_turn_profile_id,
+      turn_deadline_at = p_turn_deadline_at,
+      version = v_next_version,
+      updated_at = now()
+  where tables.id = p_table_id;
+
+  return query
+    select entries.profile_id, entries.credits, entries.table_version
+    from public.apply_multiplayer_credit_entries_versioned(p_table_id, p_game_id, p_entries, v_next_version) entries;
+end;
+$$;
+
+create or replace function public.apply_multiplayer_table_step(
+  p_table_id uuid,
+  p_expected_version integer,
+  p_game_id text,
+  p_state jsonb,
+  p_public_state jsonb,
+  p_turn_profile_id uuid,
+  p_turn_deadline_at timestamptz,
+  p_status text,
+  p_entries jsonb
+)
+returns table(profile_id uuid, credits numeric, table_version integer)
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_table public.multiplayer_tables%rowtype;
+  v_changed integer;
+  v_next_version integer;
+  v_entry_count integer;
+begin
+  select tables.*
+  into v_table
+  from public.multiplayer_tables tables
+  where tables.id = p_table_id
+  for update;
+
+  if v_table.id is null then
+    raise exception 'multiplayer_table_not_found';
+  end if;
+
+  if v_table.status <> 'active' or v_table.version <> p_expected_version or v_table.game_id <> p_game_id then
+    raise exception 'stale_multiplayer_step';
+  end if;
+
+  if p_status not in ('active', 'complete') then
+    raise exception 'invalid_multiplayer_status';
+  end if;
+
+  v_entry_count := jsonb_array_length(p_entries);
+
+  insert into public.multiplayer_table_state (table_id, state, updated_at)
+  values (p_table_id, p_state, now())
+  on conflict (table_id) do update
+  set state = excluded.state,
+      updated_at = excluded.updated_at;
+
+  if v_entry_count > 0 then
+    update public.multiplayer_table_seats seats
+    set status = 'settled',
+        settled_delta = entries.settled_delta,
+        updated_at = now()
+    from (
+      select
+        (entry ->> 'profileId')::uuid as profile_id,
+        coalesce(nullif(entry ->> 'settledDelta', '')::numeric, 0) as settled_delta
+      from jsonb_array_elements(p_entries) entry
+    ) entries
+    where seats.table_id = p_table_id
+      and seats.profile_id = entries.profile_id
+      and seats.status = 'active';
+
+    get diagnostics v_changed = row_count;
+    if v_changed <> v_entry_count then
+      raise exception 'multiplayer_settlement_changed';
+    end if;
+  end if;
+
+  v_next_version := v_table.version + 1;
+
+  update public.multiplayer_tables tables
+  set status = p_status,
+      public_state = p_public_state,
+      turn_profile_id = p_turn_profile_id,
+      turn_deadline_at = p_turn_deadline_at,
+      version = v_next_version,
+      updated_at = now()
+  where tables.id = p_table_id;
+
+  if v_entry_count > 0 then
+    return query
+      select entries.profile_id, entries.credits, entries.table_version
+      from public.apply_multiplayer_credit_entries_versioned(p_table_id, p_game_id, p_entries, v_next_version) entries;
+  end if;
+end;
+$$;
+
 revoke execute on function public.ensure_profile(uuid, text) from public, anon, authenticated;
 revoke execute on function public.create_game_session(uuid, text, jsonb, text, numeric, numeric, text, text) from public, anon, authenticated;
 revoke execute on function public.apply_game_step(uuid, uuid, integer, text, jsonb, text, numeric, numeric, text, text) from public, anon, authenticated;
 revoke execute on function public.apply_multiplayer_credit_entries(uuid, text, jsonb) from public, anon, authenticated;
+revoke execute on function public.apply_multiplayer_credit_entries_versioned(uuid, text, jsonb, integer) from public, anon, authenticated;
+revoke execute on function public.start_multiplayer_table_round(uuid, integer, text, jsonb, jsonb, uuid, timestamptz, text, jsonb) from public, anon, authenticated;
+revoke execute on function public.apply_multiplayer_table_step(uuid, integer, text, jsonb, jsonb, uuid, timestamptz, text, jsonb) from public, anon, authenticated;
+revoke execute on function public.is_multiplayer_table_member(uuid) from public, anon;
+revoke execute on function public.is_multiplayer_table_public(uuid) from public, anon;
 
 grant execute on function public.ensure_profile(uuid, text) to service_role;
 grant execute on function public.create_game_session(uuid, text, jsonb, text, numeric, numeric, text, text) to service_role;
 grant execute on function public.apply_game_step(uuid, uuid, integer, text, jsonb, text, numeric, numeric, text, text) to service_role;
 grant execute on function public.apply_multiplayer_credit_entries(uuid, text, jsonb) to service_role;
+grant execute on function public.apply_multiplayer_credit_entries_versioned(uuid, text, jsonb, integer) to service_role;
+grant execute on function public.start_multiplayer_table_round(uuid, integer, text, jsonb, jsonb, uuid, timestamptz, text, jsonb) to service_role;
+grant execute on function public.apply_multiplayer_table_step(uuid, integer, text, jsonb, jsonb, uuid, timestamptz, text, jsonb) to service_role;
+grant execute on function public.is_multiplayer_table_member(uuid) to authenticated;
+grant execute on function public.is_multiplayer_table_public(uuid) to authenticated;

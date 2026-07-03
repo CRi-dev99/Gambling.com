@@ -108,10 +108,80 @@ Deno.serve(async (req) => {
     return json({ error: "unknown_request_type" }, 400);
   } catch (error) {
     const message = String(error?.message || error);
-    const status = message.includes("insufficient_credits") ? 402 : 400;
-    return json({ error: message }, status);
+    console.error("play-game error", message);
+    return json({ error: publicErrorMessage(message) }, publicErrorStatus(message));
   }
 });
+
+function publicErrorStatus(message) {
+  if (message.includes("insufficient_credits")) return 402;
+  if (message.includes("unauthorized")) return 401;
+  if (message.includes("not_your_turn") || message.includes("host_only")) return 403;
+  if (message.includes("session_not_found") || message.includes("table_not_found")) return 404;
+  if (message.includes("stale_or_closed_game_session") || message.includes("session_closed")) return 409;
+  return 400;
+}
+
+function publicErrorMessage(message) {
+  const knownErrors = [
+    "action_not_supported",
+    "already_at_table",
+    "blackjack_round_not_active",
+    "blackjack_table_not_active",
+    "bet_exceeds_max",
+    "bet_must_be_positive_integer",
+    "cannot_leave_active_table",
+    "cashout_not_available",
+    "could_not_create_invite_code",
+    "dice_table_not_active",
+    "door_not_available",
+    "host_only",
+    "illegal_move",
+    "insufficient_credits",
+    "invalid_action",
+    "invalid_bet",
+    "invalid_blackjack_action",
+    "invalid_card_index",
+    "invalid_corridor_action",
+    "invalid_dice_action",
+    "invalid_dice_mode",
+    "invalid_invite_code",
+    "invalid_multiplayer_status",
+    "invalid_poker_action",
+    "invalid_seat_count",
+    "invalid_stake",
+    "max_players_must_be_2_to_6",
+    "missing_session",
+    "multiplayer_seats_changed",
+    "multiplayer_settlement_changed",
+    "multiplayer_state_not_found",
+    "multiplayer_table_not_found",
+    "need_at_least_two_players",
+    "no_active_turn",
+    "not_seated_at_table",
+    "not_your_turn",
+    "players_not_ready",
+    "poker_round_not_active",
+    "poker_table_not_active",
+    "session_closed",
+    "session_not_found",
+    "stale_multiplayer_step",
+    "stale_multiplayer_table",
+    "stale_or_closed_game_session",
+    "stand_required_at_21",
+    "stock_empty",
+    "table_already_started",
+    "table_full",
+    "table_not_active",
+    "table_not_found",
+    "turn_deadline_not_reached",
+    "unknown_game",
+    "unknown_multiplayer_game",
+    "unknown_multiplayer_request",
+    "unknown_request_type"
+  ];
+  return knownErrors.find((knownError) => message.includes(knownError)) || "game_request_failed";
+}
 
 function getSupabaseEnv() {
   const url = Deno.env.get("SUPABASE_URL");
@@ -183,7 +253,7 @@ async function handleMultiplayer(admin, user, profile, body) {
     case "multiplayer:sync":
       return syncMultiplayerTable(admin, user.id, profile, body);
     default:
-      return { error: "unknown_multiplayer_request" };
+      throw new Error("unknown_multiplayer_request");
   }
 }
 
@@ -281,6 +351,7 @@ async function joinMultiplayerTable(admin, user, profile, body) {
   let seatIndex = 0;
   while (used.has(seatIndex)) seatIndex += 1;
 
+  const claimedTable = await claimWaitingTableMutation(admin, table);
   const { error } = await admin.from("multiplayer_table_seats").insert({
     table_id: table.id,
     profile_id: user.id,
@@ -290,22 +361,21 @@ async function joinMultiplayerTable(admin, user, profile, body) {
   });
   if (error) throw error;
 
-  await touchMultiplayerTable(admin, table.id);
-  return { profile, table: await hydrateMultiplayerTable(admin, table.id, user.id) };
+  return { profile, table: await hydrateMultiplayerTable(admin, table.id, user.id, claimedTable) };
 }
 
 async function setMultiplayerReady(admin, profileId, profile, body) {
   const table = await requireMultiplayerTableForSeat(admin, String(body.tableId || ""), profileId);
   if (table.status !== "waiting") throw new Error("table_already_started");
   const ready = body.ready !== false;
+  const claimedTable = await claimWaitingTableMutation(admin, table);
   const { error } = await admin
     .from("multiplayer_table_seats")
     .update({ status: ready ? "ready" : "seated", updated_at: new Date().toISOString() })
     .eq("table_id", table.id)
     .eq("profile_id", profileId);
   if (error) throw error;
-  await touchMultiplayerTable(admin, table.id);
-  return { profile, table: await hydrateMultiplayerTable(admin, table.id, profileId) };
+  return { profile, table: await hydrateMultiplayerTable(admin, table.id, profileId, claimedTable) };
 }
 
 async function startMultiplayerTable(admin, profileId, profile, body) {
@@ -326,40 +396,22 @@ async function startMultiplayerTable(admin, profileId, profile, body) {
     outcome: "escrow",
     action: "multiplayer_escrow"
   }));
-  const credits = await rpcRows(admin, "apply_multiplayer_credit_entries", {
-    p_table_id: table.id,
-    p_game_id: table.game_id,
-    p_entries: entries
-  });
 
   const setupState = await getMultiplayerPrivateState(admin, table.id);
   const started = createMultiplayerState(table.game_id, Number(table.stake), activeSeats, setupState?.state?.diceMode);
-  const publicState = multiplayerPublicState(started, table, activeSeats, profileId);
   const deadline = started.phase === "complete" ? null : turnDeadline();
-
-  await saveMultiplayerState(admin, table.id, started);
-  await admin
-    .from("multiplayer_table_seats")
-    .update({ status: "active", updated_at: new Date().toISOString() })
-    .eq("table_id", table.id)
-    .in("profile_id", activeSeats.map((seat) => seat.profile_id));
-
-  const { error } = await admin
-    .from("multiplayer_tables")
-    .update({
-      status: started.phase === "complete" ? "complete" : "active",
-      public_state: publicState,
-      turn_profile_id: started.phase === "complete" ? null : currentTurnProfileId(started),
-      turn_deadline_at: deadline,
-      version: Number(table.version) + 1,
-      updated_at: new Date().toISOString()
-    })
-    .eq("id", table.id);
-  if (error) throw error;
-
-  if (started.phase === "complete") {
-    await settleMultiplayerTable(admin, table.id, table.game_id, Number(table.stake), started);
-  }
+  const storedPublicState = multiplayerStoredPublicState(started, table, activeSeats);
+  const credits = await rpcRows(admin, "start_multiplayer_table_round", {
+    p_table_id: table.id,
+    p_expected_version: table.version,
+    p_game_id: table.game_id,
+    p_state: started,
+    p_public_state: storedPublicState,
+    p_turn_profile_id: started.phase === "complete" ? null : currentTurnProfileId(started),
+    p_turn_deadline_at: deadline,
+    p_status: started.phase === "complete" ? "complete" : "active",
+    p_entries: entries
+  });
 
   return {
     profile: profileWithCredits(profile, credits, profileId),
@@ -383,27 +435,29 @@ async function applyMultiplayerPlayerAction(admin, profileId, profile, body, tim
 
   const next = stepMultiplayerState(state, actorProfileId, body.action || {}, timeout);
   const seats = await getMultiplayerSeats(admin, table.id);
-  const publicState = multiplayerPublicState(next, table, seats, profileId);
   const complete = next.phase === "complete";
-  let credits = [];
+  const settlements = complete ? multiplayerSettlements(next, Number(table.stake)) : [];
+  const entries = settlements.map((item) => ({
+    profileId: item.profileId,
+    bet: Number(table.stake),
+    delta: item.payout,
+    outcome: item.outcome,
+    action: "multiplayer_settle",
+    settledDelta: item.net
+  }));
 
-  await saveMultiplayerState(admin, table.id, next);
-  if (complete) {
-    credits = await settleMultiplayerTable(admin, table.id, table.game_id, Number(table.stake), next);
-  }
-
-  const { error } = await admin
-    .from("multiplayer_tables")
-    .update({
-      status: complete ? "complete" : "active",
-      public_state: publicState,
-      turn_profile_id: complete ? null : currentTurnProfileId(next),
-      turn_deadline_at: complete ? null : turnDeadline(),
-      version: Number(table.version) + 1,
-      updated_at: new Date().toISOString()
-    })
-    .eq("id", table.id);
-  if (error) throw error;
+  const storedPublicState = multiplayerStoredPublicState(next, table, seats);
+  const credits = await rpcRows(admin, "apply_multiplayer_table_step", {
+    p_table_id: table.id,
+    p_expected_version: table.version,
+    p_game_id: table.game_id,
+    p_state: next,
+    p_public_state: storedPublicState,
+    p_turn_profile_id: complete ? null : currentTurnProfileId(next),
+    p_turn_deadline_at: complete ? null : turnDeadline(),
+    p_status: complete ? "complete" : "active",
+    p_entries: entries
+  });
 
   return {
     profile: profileWithCredits(profile, credits, profileId),
@@ -414,6 +468,7 @@ async function applyMultiplayerPlayerAction(admin, profileId, profile, body, tim
 async function leaveMultiplayerTable(admin, profileId, profile, body) {
   const table = await requireMultiplayerTableForSeat(admin, String(body.tableId || ""), profileId);
   if (table.status !== "waiting") throw new Error("cannot_leave_active_table");
+  const claimedTable = await claimWaitingTableMutation(admin, table);
 
   const { error } = await admin
     .from("multiplayer_table_seats")
@@ -424,17 +479,22 @@ async function leaveMultiplayerTable(admin, profileId, profile, body) {
 
   const seats = await getMultiplayerSeats(admin, table.id);
   if (!seats.length) {
-    await admin.from("multiplayer_tables").update({ status: "cancelled", updated_at: new Date().toISOString() }).eq("id", table.id);
+    const { error: cancelError } = await admin
+      .from("multiplayer_tables")
+      .update({ status: "cancelled", version: Number(claimedTable.version) + 1, updated_at: new Date().toISOString() })
+      .eq("id", table.id)
+      .eq("version", claimedTable.version);
+    if (cancelError) throw cancelError;
     return { profile, table: null };
   }
 
   if (table.host_profile_id === profileId) {
-    await admin
+    const { error: hostError } = await admin
       .from("multiplayer_tables")
       .update({ host_profile_id: seats[0].profile_id, updated_at: new Date().toISOString() })
-      .eq("id", table.id);
-  } else {
-    await touchMultiplayerTable(admin, table.id);
+      .eq("id", table.id)
+      .eq("version", claimedTable.version);
+    if (hostError) throw hostError;
   }
 
   return { profile, table: null };
@@ -486,19 +546,21 @@ async function getMultiplayerPrivateState(admin, tableId) {
   return data;
 }
 
-async function saveMultiplayerState(admin, tableId, state) {
-  const { error } = await admin
-    .from("multiplayer_table_state")
-    .upsert({ table_id: tableId, state, updated_at: new Date().toISOString() });
-  if (error) throw error;
-}
-
-async function touchMultiplayerTable(admin, tableId) {
-  const { error } = await admin
+async function claimWaitingTableMutation(admin, table) {
+  const { data, error } = await admin
     .from("multiplayer_tables")
-    .update({ updated_at: new Date().toISOString() })
-    .eq("id", tableId);
+    .update({
+      version: Number(table.version) + 1,
+      updated_at: new Date().toISOString()
+    })
+    .eq("id", table.id)
+    .eq("status", "waiting")
+    .eq("version", table.version)
+    .select("*")
+    .maybeSingle();
   if (error) throw error;
+  if (!data) throw new Error("stale_multiplayer_table");
+  return data;
 }
 
 async function hydrateMultiplayerTable(admin, tableId, viewerId, tableRow = null, seatsRow = null) {
@@ -608,42 +670,6 @@ function turnDeadline() {
 function profileWithCredits(profile, rows, profileId) {
   const row = (rows || []).find((item) => item.profile_id === profileId || item.profileId === profileId);
   return row ? { ...profile, credits: Number(row.credits) } : profile;
-}
-
-async function settleMultiplayerTable(admin, tableId, gameId, stake, state) {
-  const currentSeats = await getMultiplayerSeats(admin, tableId);
-  const alreadySettled = state.players.every((player) =>
-    currentSeats.some((seat) => seat.profile_id === player.profileId && seat.status === "settled")
-  );
-  if (alreadySettled) return [];
-
-  const settlements = multiplayerSettlements(state, stake);
-  const entries = settlements.map((item) => ({
-    profileId: item.profileId,
-    bet: stake,
-    delta: item.payout,
-    outcome: item.outcome,
-    action: "multiplayer_settle"
-  }));
-  const credits = await rpcRows(admin, "apply_multiplayer_credit_entries", {
-    p_table_id: tableId,
-    p_game_id: gameId,
-    p_entries: entries
-  });
-
-  for (const settlement of settlements) {
-    await admin
-      .from("multiplayer_table_seats")
-      .update({
-        status: "settled",
-        settled_delta: roundMoney(settlement.payout - stake),
-        updated_at: new Date().toISOString()
-      })
-      .eq("table_id", tableId)
-      .eq("profile_id", settlement.profileId);
-  }
-
-  return credits;
 }
 
 function createMultiplayerState(gameId, stake, seats, diceMode = "high") {
@@ -933,6 +959,10 @@ function diceWinners(state) {
   return state.players.filter((player) => player.total === high);
 }
 
+function multiplayerStoredPublicState(state, table, seats) {
+  return multiplayerPublicState(state, table, seats, null);
+}
+
 function multiplayerPublicState(state, table, seats, viewerId) {
   const base = {
     mode: "multiplayer",
@@ -1064,8 +1094,8 @@ function json(body, status = 200) {
 
 function parseBet(raw) {
   const bet = Number(raw);
-  if (!Number.isInteger(bet) || bet <= 0) throw new Error("Bet must be a positive whole number.");
-  if (bet > MAX_BET) throw new Error(`Bet cannot exceed ${MAX_BET} credits.`);
+  if (!Number.isInteger(bet) || bet <= 0) throw new Error("bet_must_be_positive_integer");
+  if (bet > MAX_BET) throw new Error("bet_exceeds_max");
   return bet;
 }
 
