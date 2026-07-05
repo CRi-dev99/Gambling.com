@@ -5,6 +5,7 @@ import test from "node:test";
 test("browser client does not mutate credits directly", async () => {
   const app = await readFile(new URL("../static/js/app.js", import.meta.url), "utf8");
   const client = await readFile(new URL("../static/js/supabaseClient.js", import.meta.url), "utf8");
+  const admin = await readFile(new URL("../static/js/admin.js", import.meta.url), "utf8");
 
   assert.equal(app.includes("updateProfileCredits"), false);
   assert.equal(app.includes("logGameRound"), false);
@@ -13,6 +14,12 @@ test("browser client does not mutate credits directly", async () => {
   assert.equal(client.includes(".from(\"multiplayer_tables\").insert"), false);
   assert.equal(client.includes(".from(\"multiplayer_table_state\")"), false);
   assert.equal(client.includes("functions.invoke(\"play-game\""), true);
+  assert.equal(admin.includes("supabase.from("), false);
+  assert.equal(admin.includes(".from(\"profiles\")"), false);
+  assert.equal(admin.includes(".from(\"game_history\")"), false);
+  assert.equal(admin.includes(".from(\"admin_audit_log\")"), false);
+  assert.equal(admin.includes("SERVICE_ROLE"), false);
+  assert.equal(admin.includes("ADMIN_PASSWORD"), false);
 });
 
 test("multiplayer create reads form values before pending rerender", async () => {
@@ -30,9 +37,12 @@ test("multiplayer create reads form values before pending rerender", async () =>
 
 test("html avoids ineffective meta frame-ancestors and supplies favicon", async () => {
   const html = await readFile(new URL("../index.html", import.meta.url), "utf8");
+  const app = await readFile(new URL("../static/js/app.js", import.meta.url), "utf8");
 
   assert.equal(html.includes("frame-ancestors"), false);
   assert.equal(html.includes("rel=\"icon\""), true);
+  assert.equal(html.includes("admin.html"), false);
+  assert.equal(app.includes("admin:"), false);
 });
 
 test("database schema blocks direct client credit writes", async () => {
@@ -104,4 +114,29 @@ test("edge function stores viewer-neutral multiplayer public state", async () =>
   assert.equal(edge.includes("function multiplayerStoredPublicState"), true);
   assert.equal(edge.includes("return multiplayerPublicState(state, table, seats, null);"), true);
   assert.equal(edge.includes("p_public_state: storedPublicState"), true);
+});
+
+test("admin schema is service-role-only", async () => {
+  const schema = await readFile(new URL("../supabase/schema.sql", import.meta.url), "utf8");
+
+  assert.equal(schema.includes("create table if not exists public.admin_audit_log"), true);
+  assert.equal(schema.includes("create table if not exists public.admin_game_overrides"), true);
+  assert.equal(schema.includes("alter table public.admin_audit_log enable row level security"), true);
+  assert.equal(schema.includes("alter table public.admin_game_overrides enable row level security"), true);
+  assert.equal(schema.includes("grant select, insert, update, delete on public.admin_audit_log to service_role"), true);
+  assert.equal(schema.includes("grant select, insert, update, delete on public.admin_game_overrides to service_role"), true);
+  assert.equal(schema.includes("revoke all on public.admin_audit_log from anon, authenticated"), true);
+  assert.equal(schema.includes("revoke all on public.admin_game_overrides from anon, authenticated"), true);
+});
+
+test("admin edge requests require server-side token checks", async () => {
+  const edge = await readFile(new URL("../supabase/functions/play-game/index.ts", import.meta.url), "utf8");
+
+  assert.equal(edge.includes("ADMIN_EMAILS"), true);
+  assert.equal(edge.includes("ADMIN_TOKEN_SECRET"), true);
+  assert.equal(edge.includes("admin:login"), true);
+  assert.equal(edge.includes("requireAdminUser"), true);
+  assert.equal(edge.includes("admin:credits:update"), true);
+  assert.equal(edge.includes("admin:game-control:set"), true);
+  assert.equal(edge.includes("admin:tables:force-timeout"), true);
 });

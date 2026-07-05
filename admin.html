@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://cdn.jsdelivr.net; style-src 'self'; connect-src 'self' https://*.supabase.co wss://*.supabase.co; img-src 'self' data:; object-src 'none'; base-uri 'self'; form-action 'self'">
+    <title>Control Room</title>
+    <link rel="stylesheet" href="static/css/styles.css">
+    <script src="static/js/supabase-config.js"></script>
+    <script
+      src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.110.0/dist/umd/supabase.min.js"
+      integrity="sha384-DjOvX/sJLsmbMrw4wTvf6l3kiGBjdxyOO6X2MTFwOOXGkjN/mE08BoDzrpaaIjil"
+      crossorigin="anonymous"></script>
+    <script type="module" src="static/js/admin.js?v=bet-limit-billion-1"></script>
+  </head>
+  <body>
+    <main class="admin-shell">
+      <section id="adminUnlock" class="admin-unlock">
+        <div class="brand-lockup">
+          <span class="brand-mark" aria-hidden="true">G</span>
+          <div>
+            <p class="eyebrow">Control room</p>
+            <h1>Restricted access</h1>
+          </div>
+        </div>
+        <form id="adminLoginForm" class="auth-form admin-login-form">
+          <label class="field">
+            <span>Email</span>
+            <input id="adminEmail" type="email" autocomplete="email" required>
+          </label>
+          <label class="field">
+            <span>Account password</span>
+            <input id="adminAccountPassword" type="password" autocomplete="current-password" required>
+          </label>
+          <label class="field">
+            <span>Admin password</span>
+            <input id="adminPassword" type="password" autocomplete="off" required>
+          </label>
+          <button id="adminLoginButton" class="primary-action" type="submit">Unlock</button>
+          <p id="adminLoginMessage" class="form-message" role="status"></p>
+        </form>
+      </section>
+
+      <section id="adminConsole" class="admin-console is-hidden">
+        <header class="admin-topbar">
+          <div>
+            <p id="adminSessionLabel" class="eyebrow">Unlocked</p>
+            <h1>Control room</h1>
+          </div>
+          <button id="adminSignOut" class="ghost-action" type="button">Lock</button>
+        </header>
+
+        <nav id="adminTabs" class="admin-tabs" aria-label="Control room tabs">
+          <button class="segment is-active" type="button" data-tab="users">Users</button>
+          <button class="segment" type="button" data-tab="sessions">Solo sessions</button>
+          <button class="segment" type="button" data-tab="tables">Tables</button>
+          <button class="segment" type="button" data-tab="audit">Audit</button>
+        </nav>
+
+        <div id="adminMessage" class="notice is-hidden" role="status"></div>
+        <section id="adminContent" class="admin-content"></section>
+      </section>
+    </main>
+  </body>
+</html>

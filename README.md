@@ -1,4 +1,4 @@
-# Gambling.com Fictional-Credit Casino
+# CS Casino Fictional-Credit Casino
 
 A browser casino built with Supabase Auth, private server-side game sessions, transactional fictional-credit accounting, and row-level security. Credits are fictional only: there are no deposits, withdrawals, payments, prizes, or real-money mechanics.
 
@@ -16,7 +16,14 @@ supabase functions deploy play-game
 
 4. Confirm the Edge Function has access to `SUPABASE_URL`, a browser-safe anon/publishable key, and a service-role/secret key. Supabase hosted functions provide these automatically for normal projects.
 5. Put your project URL and anon key in `static/js/supabase-config.js`.
-6. Serve the site locally:
+6. To use the hidden admin console, set Edge Function secrets before redeploying:
+
+```bash
+supabase secrets set ADMIN_EMAILS=you@example.com ADMIN_PASSWORD=change-this ADMIN_TOKEN_SECRET=use-a-long-random-secret
+supabase functions deploy play-game
+```
+
+7. Serve the site locally:
 
 ```bash
 npm run serve
@@ -24,12 +31,14 @@ npm run serve
 
 Then open `http://localhost:8000`.
 
+The admin console is intentionally not linked from the app. Open `http://localhost:8000/admin.html` directly.
+
 ## Games
 
 - Blackjack: single player against automated dealer rules.
 - Blackjack multiplayer: optional 2-6 player shared-dealer table with escrowed fictional-credit stakes.
-- Five-card Poker: solo draw poker.
-- Five-card Poker multiplayer: optional 2-6 player competitive draw poker with showdown pot settlement.
+- Texas Hold'em: solo poker with two hole cards, community cards, and showdown scoring.
+- Texas Hold'em multiplayer: optional 2-6 player competitive table with shared community cards and pot settlement.
 - Solitaire: simplified Klondike.
 - Slots: weighted three-reel machine.
 - Corridor: five-room door minigame.

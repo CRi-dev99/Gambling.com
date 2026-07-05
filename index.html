@@ -4,15 +4,15 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://cdn.jsdelivr.net; style-src 'self'; connect-src 'self' https://*.supabase.co wss://*.supabase.co; img-src 'self' data:; object-src 'none'; base-uri 'self'; form-action 'self'">
-    <title>Gambling.com Casino</title>
+    <title>CS Casino</title>
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%23000000'/%3E%3Ccircle cx='32' cy='32' r='22' fill='none' stroke='%23D4AF37' stroke-width='5'/%3E%3Ctext x='32' y='41' text-anchor='middle' font-family='Arial,sans-serif' font-size='28' font-weight='700' fill='%23FFF8E7'%3EG%3C/text%3E%3C/svg%3E">
-    <link rel="stylesheet" href="static/css/styles.css">
+    <link rel="stylesheet" href="static/css/styles.css?v=solitaire-tableau-step-3">
     <script src="static/js/supabase-config.js"></script>
     <script
       src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.110.0/dist/umd/supabase.min.js"
       integrity="sha384-DjOvX/sJLsmbMrw4wTvf6l3kiGBjdxyOO6X2MTFwOOXGkjN/mE08BoDzrpaaIjil"
       crossorigin="anonymous"></script>
-    <script type="module" src="static/js/app.js"></script>
+    <script type="module" src="static/js/app.js?v=solitaire-tableau-step-3"></script>
   </head>
   <body>
     <div id="authScreen" class="auth-screen">
@@ -20,7 +20,7 @@
         <div class="brand-lockup">
           <span class="brand-mark" aria-hidden="true">G</span>
           <div>
-            <h1 id="authTitle">Gambling.com</h1>
+            <h1 id="authTitle">CS Casino</h1>
           </div>
         </div>
 
@@ -59,7 +59,7 @@
           <span class="brand-mark" aria-hidden="true">G</span>
           <div>
             <p class="eyebrow">Casino floor</p>
-            <strong>Gambling.com</strong>
+            <strong>CS Casino</strong>
           </div>
         </div>
         <nav id="gameNav" class="game-nav" aria-label="Games"></nav>
@@ -72,13 +72,21 @@
             <p class="eyebrow" id="sessionLabel">Signed in</p>
             <h2 id="viewTitle">Casino Dashboard</h2>
           </div>
-          <div class="wallet" aria-live="polite">
-            <span>Credits</span>
-            <strong id="creditBalance">0</strong>
+          <div class="topbar-actions">
+            <button id="profileAvatarButton" class="profile-avatar-button" type="button" aria-label="Change profile picture">
+              <span id="profileAvatarPreview" class="profile-avatar profile-avatar-sm" aria-hidden="true"></span>
+              <span id="profileAvatarName">Profile</span>
+            </button>
+            <div class="wallet" aria-live="polite">
+              <span>Credits</span>
+              <strong id="creditBalance">0</strong>
+            </div>
           </div>
         </header>
 
         <section id="dashboardView" class="dashboard-grid"></section>
+
+        <section id="leaderboardView" class="leaderboard-view is-hidden"></section>
 
         <section id="gameView" class="game-view is-hidden">
           <div class="game-toolbar">
@@ -91,6 +99,27 @@
           <div id="gameRoot" class="game-root"></div>
         </section>
       </main>
+
+      <div id="avatarModal" class="profile-modal is-hidden" role="dialog" aria-modal="true" aria-labelledby="avatarModalTitle">
+        <section class="profile-modal-card">
+          <div class="profile-modal-header">
+            <h3 id="avatarModalTitle">Profile picture</h3>
+            <button id="avatarModalClose" class="icon-action" type="button" aria-label="Close profile picture dialog">&times;</button>
+          </div>
+          <div id="avatarDropzone" class="avatar-dropzone" tabindex="0">
+            <span id="avatarModalPreview" class="profile-avatar profile-avatar-lg" aria-hidden="true"></span>
+            <strong>Drop, paste, or upload an image</strong>
+            <span>PNG, JPG, or WebP</span>
+            <input id="avatarFileInput" class="is-hidden" type="file" accept="image/png,image/jpeg,image/webp">
+          </div>
+          <div class="button-row avatar-actions">
+            <button id="avatarUploadButton" class="game-button" type="button">Upload</button>
+            <button id="avatarClearButton" class="game-button" type="button">Remove</button>
+            <button id="avatarSaveButton" class="game-button is-primary" type="button">Save</button>
+          </div>
+          <p id="avatarMessage" class="form-message" role="status"></p>
+        </section>
+      </div>
     </div>
   </body>
 </html>

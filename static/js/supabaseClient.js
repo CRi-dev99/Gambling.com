@@ -10,23 +10,34 @@ export const isSupabaseConfigured =
 
 export const startingCredits = Number(config.startingCredits || 1000);
 
-export const supabase = isSupabaseConfigured
-  ? window.supabase.createClient(config.url, config.anonKey)
-  : null;
+export function createSupabaseBrowserClient(options = {}) {
+  if (!isSupabaseConfigured) return null;
+  return window.supabase.createClient(config.url, config.anonKey, options);
+}
+
+let casinoSupabase = null;
+
+function getCasinoSupabase() {
+  if (!casinoSupabase) casinoSupabase = createSupabaseBrowserClient();
+  return casinoSupabase;
+}
 
 export async function getCurrentSession() {
+  const supabase = getCasinoSupabase();
   if (!supabase) return { session: null, error: null };
   const { data, error } = await supabase.auth.getSession();
   return { session: data?.session || null, error };
 }
 
 export function onAuthChange(callback) {
+  const supabase = getCasinoSupabase();
   if (!supabase) return () => {};
   const { data } = supabase.auth.onAuthStateChange((_event, session) => callback(session));
   return () => data.subscription.unsubscribe();
 }
 
 export async function signIn(email, password) {
+  const supabase = getCasinoSupabase();
   if (!supabase) throw new Error("Supabase is not configured.");
   const { data, error } = await supabase.auth.signInWithPassword({ email, password });
   if (error) throw error;
@@ -34,6 +45,7 @@ export async function signIn(email, password) {
 }
 
 export async function signUp(email, password, username) {
+  const supabase = getCasinoSupabase();
   if (!supabase) throw new Error("Supabase is not configured.");
   const { data, error } = await supabase.auth.signUp({
     email,
@@ -47,19 +59,31 @@ export async function signUp(email, password, username) {
 }
 
 export async function signOut() {
+  const supabase = getCasinoSupabase();
   if (!supabase) return;
   const { error } = await supabase.auth.signOut();
   if (error) throw error;
 }
 
 export async function ensureProfile(user) {
+  const supabase = getCasinoSupabase();
   if (!supabase) throw new Error("Supabase is not configured.");
 
-  const { data: existing, error: selectError } = await supabase
+  let { data: existing, error: selectError } = await supabase
     .from("profiles")
-    .select("id, username, credits")
+    .select("id, username, credits, avatar_url")
     .eq("id", user.id)
     .maybeSingle();
+
+  if (selectError && String(selectError.message || "").includes("avatar_url")) {
+    const fallback = await supabase
+      .from("profiles")
+      .select("id, username, credits")
+      .eq("id", user.id)
+      .maybeSingle();
+    existing = fallback.data;
+    selectError = fallback.error;
+  }
 
   if (selectError) throw selectError;
   if (existing) return normalizeProfile(existing);
@@ -84,7 +108,23 @@ export async function multiplayerRequest(payload) {
   };
 }
 
+export async function updateProfileAvatar(avatarUrl) {
+  const data = await invokeGameServer({ type: "profile:update", avatarUrl });
+  return normalizeProfile(data.profile);
+}
+
+export async function getLeaderboard(limit = 25) {
+  const data = await invokeGameServer({ type: "leaderboard", limit });
+  return {
+    leaders: (data.leaders || []).map((leader) => ({
+      ...normalizeProfile(leader),
+      rank: Number(leader.rank || 0)
+    }))
+  };
+}
+
 export function subscribeToMultiplayerTable(tableId, callback) {
+  const supabase = getCasinoSupabase();
   if (!supabase || !tableId) return () => {};
 
   const channel = supabase
@@ -107,6 +147,7 @@ export function subscribeToMultiplayerTable(tableId, callback) {
 }
 
 async function invokeGameServer(payload) {
+  const supabase = getCasinoSupabase();
   if (!supabase) throw new Error("Supabase is not configured.");
   const { data, error } = await supabase.functions.invoke("play-game", {
     body: payload
@@ -132,7 +173,8 @@ async function functionErrorMessage(error) {
 function normalizeProfile(rawProfile) {
   return {
     ...rawProfile,
-    credits: normalizeCredits(rawProfile?.credits)
+    credits: normalizeCredits(rawProfile?.credits),
+    avatarUrl: rawProfile?.avatarUrl || rawProfile?.avatar_url || ""
   };
 }
 

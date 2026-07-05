@@ -1,16 +1,16 @@
 export const GAME_ID = 'corridor';
 
-const TOTAL_ROOMS = 5;
 const DOORS_PER_ROOM = 3;
-const GRAND_PRIZE_MULTIPLIER = 8;
 const DOOR_LABELS = ['Left', 'Center', 'Right'];
 const BONUS_RATES = [0.25, 0.4, 0.6, 0.85, 1.15];
+const MAX_BONUS_RATE = 2;
 
 export function createInitialState() {
   return {
     gameId: GAME_ID,
     phase: 'idle',
-    totalRooms: TOTAL_ROOMS,
+    totalRooms: null,
+    isEndless: true,
     doorsPerRoom: DOORS_PER_ROOM,
     roomIndex: 0,
     roomsCleared: 0,
@@ -33,6 +33,7 @@ export function getPublicState(state) {
     gameId: GAME_ID,
     phase: current.phase,
     totalRooms: current.totalRooms,
+    isEndless: current.isEndless,
     doorsPerRoom: current.doorsPerRoom,
     roomIndex: current.roomIndex,
     roomNumber: current.phase === 'inRound' ? current.roomIndex + 1 : null,
@@ -71,7 +72,7 @@ export function startRound(state, bet) {
     bet: parsedBet.value,
     roundDelta: -parsedBet.value,
     currentDoors: createRoomDoors(0, parsedBet.value),
-    message: 'Room 1 waits. Choose one of the three doors.',
+    message: 'Room 1 waits. The corridor keeps going until you escape or hit a trap.',
   };
 }
 
@@ -167,32 +168,6 @@ function chooseDoor(state, action) {
   const nextRoomIndex = state.roomIndex + 1;
   const roomsCleared = state.roomsCleared + 1;
 
-  if (nextRoomIndex >= TOTAL_ROOMS) {
-    const payout = state.bet * GRAND_PRIZE_MULTIPLIER + nextPendingBonus;
-
-    return {
-      ...state,
-      phase: 'won',
-      roomIndex: TOTAL_ROOMS,
-      roomsCleared,
-      pendingBonus: 0,
-      roundDelta: payout,
-      payout,
-      currentDoors: [],
-      history: nextHistory,
-      validationMessage: null,
-      lastResult: {
-        outcome: 'win',
-        doorOutcome: door.role,
-        roomNumber,
-        doorIndex: door.index,
-        bonusAwarded,
-        payout,
-      },
-      message: `You cleared all ${TOTAL_ROOMS} rooms and won ${payout} credits.`,
-    };
-  }
-
   return {
     ...state,
     phase: 'inRound',
@@ -241,7 +216,7 @@ function cashOut(state) {
 }
 
 function createRoomDoors(roomIndex, bet) {
-  const bonus = Math.max(1, Math.round(bet * BONUS_RATES[roomIndex]));
+  const bonus = Math.max(1, Math.round(bet * corridorBonusRate(roomIndex)));
   const roles = shuffle(['safe', 'bonus', 'trap']);
 
   return roles.map((role, index) => ({
@@ -251,6 +226,16 @@ function createRoomDoors(roomIndex, bet) {
     role,
     bonus: role === 'bonus' ? bonus : 0,
   }));
+}
+
+function corridorBonusRate(roomIndex) {
+  const index = Math.max(0, Number.isInteger(Number(roomIndex)) ? Number(roomIndex) : 0);
+  if (index < BONUS_RATES.length) {
+    return BONUS_RATES[index];
+  }
+
+  const extraRooms = index - BONUS_RATES.length + 1;
+  return Math.min(MAX_BONUS_RATE, BONUS_RATES[BONUS_RATES.length - 1] + extraRooms * 0.1);
 }
 
 function shuffle(items) {
@@ -273,10 +258,11 @@ function normalizeState(state) {
     ...createInitialState(),
     ...state,
     gameId: GAME_ID,
-    totalRooms: TOTAL_ROOMS,
+    totalRooms: null,
+    isEndless: true,
     doorsPerRoom: DOORS_PER_ROOM,
-    roomIndex: normalizeInteger(state.roomIndex, 0, TOTAL_ROOMS),
-    roomsCleared: normalizeInteger(state.roomsCleared, 0, TOTAL_ROOMS),
+    roomIndex: normalizeInteger(state.roomIndex, 0, Number.MAX_SAFE_INTEGER),
+    roomsCleared: normalizeInteger(state.roomsCleared, 0, Number.MAX_SAFE_INTEGER),
     bet: normalizeCreditValue(state.bet),
     pendingBonus: normalizeCreditValue(state.pendingBonus),
     roundDelta: Number.isFinite(Number(state.roundDelta)) ? Number(state.roundDelta) : 0,
@@ -396,7 +382,7 @@ function findDoor(doors, action) {
 }
 
 function canCashOut(state) {
-  return state.phase === 'inRound' && state.roomsCleared > 0 && state.roomIndex < TOTAL_ROOMS;
+  return state.phase === 'inRound' && state.roomsCleared > 0;
 }
 
 function withError(state, message) {
@@ -432,7 +418,7 @@ function cloneHistoryEntry(entry) {
   }
 
   return {
-    roomNumber: normalizeInteger(entry.roomNumber, 1, TOTAL_ROOMS),
+    roomNumber: normalizeInteger(entry.roomNumber, 1, Number.MAX_SAFE_INTEGER),
     doorIndex: normalizeInteger(entry.doorIndex, 0, DOORS_PER_ROOM - 1),
     doorId: String(entry.doorId ?? ''),
     label: String(entry.label ?? 'Door'),
